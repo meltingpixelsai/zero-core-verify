@@ -45,8 +45,8 @@ function listTools() {
     tools: [
       { name: "list_tools", description: "List all tools with pricing", price: "FREE" },
       { name: "health", description: "Server status and payment config", price: "FREE" },
-      { name: "verify_outcome", description: "LLM-as-judge verification of service outcomes", price: "$0.01" },
-      { name: "get_service_quality", description: "Aggregated quality scores for a service", price: "$0.005" },
+      { name: "verify_outcome", description: "Code-checked verification of service outcomes, with an advisory AI judge", price: "$0.01" },
+      { name: "get_service_quality", description: "Aggregated quality scores for a service (self-reported, unattested)", price: "$0.005" },
       { name: "report_outcome", description: "Simple pass/fail outcome report", price: "$0.002" },
     ],
   };
@@ -122,27 +122,36 @@ const createPaidHandler = () => createMcpPaidHandler(
 
     paidTool(
       "verify_outcome",
-      "Post-transaction verification using LLM-as-judge. Checks if a service delivered what was promised. Returns completeness score, accuracy score, format compliance, SLA adherence, issues list, and overall pass/fail.",
+      "Post-transaction verification. Code checks what it can: the response against expected_schema (a JSON Schema or a list of required field names), and a measured response time against a stated limit. A response that fails code's checks fails without the AI judge; otherwise the judge scores accuracy and completeness as advice. Without a schema or a time limit only the judge decides, and decided_by says so. Returns a verdict (pass, fail or inconclusive), decided_by, scores, format compliance, SLA result, issues, and what code checked.",
       "$0.01",
       {
-        request_description: z.string().describe("What was requested from the service"),
-        response_data: z.string().describe("The actual response/output received from the service"),
-        expected_schema: z.string().optional().describe("Expected output format or JSON schema"),
-        sla_requirements: z.string().optional().describe("SLA requirements to check against (e.g. 'response under 5s, must include all fields')"),
-        service_id: z.string().optional().describe("Service identifier for quality tracking (e.g. 'harvey-tools/scrape_url')"),
+        request_description: z.string().max(8_000).describe("What was requested from the service"),
+        response_data: z.string().max(100_000).describe("The actual response/output received from the service"),
+        expected_schema: z.string().max(20_000).optional().describe("A JSON Schema, or two or more required top-level field names (letters, digits, _ and -) separated by commas, e.g. 'name, price, url'. Anything else is passed to the AI judge only."),
+        sla_requirements: z.string().max(2_000).optional().describe("SLA wording for the AI judge (e.g. 'must include all fields'). For a time limit code can check, use the two fields below."),
+        service_id: z.string().max(200).optional().describe("Service identifier for quality tracking (e.g. 'harvey-tools/scrape_url')"),
+        observed_response_time_ms: z.number().int().min(0).max(3_600_000).optional().describe("The response time you measured, in milliseconds"),
+        sla_max_response_time_ms: z.number().int().min(0).max(3_600_000).optional().describe("The response time limit, in milliseconds"),
       },
       {},
-      async ({ request_description, response_data, expected_schema, sla_requirements, service_id }: {
+      async ({ request_description, response_data, expected_schema, sla_requirements, service_id, observed_response_time_ms, sla_max_response_time_ms }: {
         request_description: string;
         response_data: string;
         expected_schema?: string;
         sla_requirements?: string;
         service_id?: string;
+        observed_response_time_ms?: number;
+        sla_max_response_time_ms?: number;
       }, extra: unknown) => {
         const reporter = payingWallet(extra);
         if (!reporter) return toolError(NO_PAYER);
         try {
-          return toolResult(await verifyOutcome({ request_description, response_data, expected_schema, sla_requirements, service_id }, reporter));
+          return toolResult(
+            await verifyOutcome(
+              { request_description, response_data, expected_schema, sla_requirements, service_id, observed_response_time_ms, sla_max_response_time_ms },
+              reporter
+            )
+          );
         } catch (err) {
           return toolError(err);
         }
@@ -151,10 +160,10 @@ const createPaidHandler = () => createMcpPaidHandler(
 
     paidTool(
       "get_service_quality",
-      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns average completeness, accuracy, pass rate, format compliance rate, SLA compliance rate, and quality trend.",
+      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns the pass rate (overall, and over the rows where code checked the format or a measured time), average completeness and accuracy over the scored rows with their count, the count of inconclusive rows, format and SLA compliance rates, and a trend by pass rate. The scores are self-reported by paying wallets and not attested: nothing proves a reporter used the service.",
       "$0.005",
       {
-        service_id: z.string().describe("Service identifier to query (e.g. 'harvey-tools/scrape_url')"),
+        service_id: z.string().max(200).describe("Service identifier to query (e.g. 'harvey-tools/scrape_url')"),
       },
       {},
       async ({ service_id }: { service_id: string }) => {
@@ -171,10 +180,10 @@ const createPaidHandler = () => createMcpPaidHandler(
       "Record a simple pass/fail outcome report for a service call. No LLM analysis - just logs the result to the quality database. Cheaper alternative to verify_outcome when you only need to record success/failure.",
       "$0.002",
       {
-        service_id: z.string().describe("Service identifier (e.g. 'harvey-tools/scrape_url')"),
+        service_id: z.string().max(200).describe("Service identifier (e.g. 'harvey-tools/scrape_url')"),
         was_successful: z.boolean().describe("Whether the service call succeeded"),
-        response_time_ms: z.number().optional().describe("Response time in milliseconds"),
-        notes: z.string().optional().describe("Optional notes about the outcome"),
+        response_time_ms: z.number().int().min(0).max(3_600_000).optional().describe("Response time in milliseconds"),
+        notes: z.string().max(2_000).optional().describe("Optional notes about the outcome"),
       },
       {},
       async ({ service_id, was_successful, response_time_ms, notes }: {

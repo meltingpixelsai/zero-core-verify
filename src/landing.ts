@@ -12,8 +12,8 @@ const SERVER = {
   tools: [
     { name: "list_tools", desc: "List all tools with pricing", price: "FREE" },
     { name: "health", desc: "Server status and payment config", price: "FREE" },
-    { name: "verify_outcome", desc: "LLM-as-judge verification of service outcomes", price: "$0.01" },
-    { name: "get_service_quality", desc: "Aggregated quality scores for a service", price: "$0.005" },
+    { name: "verify_outcome", desc: "Code-checked verification, with an advisory AI judge", price: "$0.01" },
+    { name: "get_service_quality", desc: "Aggregated quality scores (self-reported, unattested)", price: "$0.005" },
     { name: "report_outcome", desc: "Simple pass/fail outcome report", price: "$0.002" },
   ],
 };

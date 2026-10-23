@@ -1,7 +1,7 @@
 {
   "name": "@meltingpixels/zero-core-verify",
   "version": "1.0.0",
-  "description": "x402-paid MCP server for post-transaction outcome verification. LLM-as-judge verifies if services delivered what was promised. Pay-per-call USDC on Solana. Zero Core (formerly Harvey) Verify.",
+  "description": "x402-paid MCP server for post-transaction outcome verification. Code checks format and time limits; an advisory AI judge scores accuracy. Pay-per-call USDC on Solana. Zero Core (formerly Harvey) Verify.",
   "type": "module",
   "mcpName": "io.github.meltingpixelsai/zero-core-verify",
   "keywords": ["mcp", "x402", "usdc", "ai-agents", "verification", "quality", "outcome-verification", "llm-judge", "zero-core"],
@@ -17,7 +17,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/x402-settle-first.test.ts src/tools/reporter-wallet.test.ts src/lib/request-guard.test.ts src/lib/graceful-shutdown.test.ts src/lib/ecosystem.test.ts src/index.wiring.test.ts src/index.isolation.test.ts"
+    "test": "tsx --test src/lib/x402-settle-first.test.ts src/tools/reporter-wallet.test.ts src/lib/request-guard.test.ts src/lib/graceful-shutdown.test.ts src/lib/ecosystem.test.ts src/index.wiring.test.ts src/index.isolation.test.ts src/lib/output-checks.test.ts src/tools/verification.test.ts src/tools/attestation.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.5",
