@@ -9,6 +9,7 @@ import { landingHtml, devHtml } from "./landing.js";
 import { verifyOutcome } from "./tools/verification.js";
 import { getServiceQuality } from "./tools/quality.js";
 import { reportOutcome } from "./tools/reporting.js";
+import { createSettleFirstPaidTools, type SettleFirstConfig } from "./lib/x402-settle-first.js";
 
 // ── Shared tool callback helpers ─────────────────────────────
 
@@ -81,11 +82,29 @@ function registerFreeTools(server: any): void {
 
 // ── x402 Paid Handler ────────────────────────────────────────
 
+const x402Config: SettleFirstConfig = {
+  facilitator: {
+    url: config.payment.facilitator as `${string}://${string}`,
+  },
+  recipient: {
+    svm: {
+      address: config.payment.wallet,
+      isTestnet: false,
+    },
+  },
+};
+
+// Paid tools take the payment (claim once, verify, settle) before they run.
+// mcpay's own paidTool runs the tool first and settles after, which gives
+// unsettled payments the tool for free. See src/lib/x402-settle-first.ts.
+const settleFirst = createSettleFirstPaidTools(x402Config);
+
 const paidHandler = createMcpPaidHandler(
   (server) => {
     registerFreeTools(server);
+    const paidTool = settleFirst(server);
 
-    server.paidTool(
+    paidTool(
       "verify_outcome",
       "Post-transaction verification using LLM-as-judge. Checks if a service delivered what was promised. Returns completeness score, accuracy score, format compliance, SLA adherence, issues list, and overall pass/fail.",
       "$0.01",
@@ -112,7 +131,7 @@ const paidHandler = createMcpPaidHandler(
       }
     );
 
-    server.paidTool(
+    paidTool(
       "get_service_quality",
       "Get aggregated quality scores for a service based on all past verifications. Returns average completeness, accuracy, pass rate, format compliance rate, SLA compliance rate, and quality trend.",
       "$0.005",
@@ -129,7 +148,7 @@ const paidHandler = createMcpPaidHandler(
       }
     );
 
-    server.paidTool(
+    paidTool(
       "report_outcome",
       "Record a simple pass/fail outcome report for a service call. No LLM analysis - just logs the result to the quality database. Cheaper alternative to verify_outcome when you only need to record success/failure.",
       "$0.002",
@@ -154,27 +173,26 @@ const paidHandler = createMcpPaidHandler(
       }
     );
   },
-  {
-    facilitator: {
-      url: config.payment.facilitator as `${string}://${string}`,
-    },
-    recipient: {
-      svm: {
-        address: config.payment.wallet,
-        isTestnet: false,
-      },
-    },
-  },
+  x402Config,
   {
     serverInfo: { name: "harvey-verify", version: "1.0.0" },
   },
   {
     maxDuration: 300,
     verboseLogs: process.env.NODE_ENV !== "production",
+    // No Redis here: without this, an anonymous GET /sse or POST /message
+    // throws "redisUrl is required" in an unawaited promise and kills the process.
+    disableSse: true,
   }
 );
 
 // ── Hono HTTP Server ─────────────────────────────────────────
+
+// A rejected promise inside the MCP transport must not stop the process and every
+// in-flight call with it (a paid call cut off after settlement is charged).
+process.on("unhandledRejection", (reason) => {
+  console.error("[mcp] unhandled rejection, process kept alive:", reason);
+});
 
 const app = new Hono();
 
@@ -190,7 +208,16 @@ app.get("/", (c) => c.html(landingHtml()));
 app.get("/dev", (c) => c.html(devHtml()));
 
 // MCP handler - x402 only
+// mcp-handler parses POST bodies outside a try, so a malformed body would reject
+// unhandled and stop the process. Answer it with a JSON-RPC parse error instead.
 app.all("*", async (c) => {
+  if (c.req.method === "POST") {
+    try {
+      JSON.parse(await c.req.raw.clone().text());
+    } catch {
+      return c.json({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null }, 400);
+    }
+  }
   return paidHandler(c.req.raw);
 });
 
