@@ -180,6 +180,9 @@ const paidHandler = createMcpPaidHandler(
   {
     maxDuration: 300,
     verboseLogs: process.env.NODE_ENV !== "production",
+    // No Redis here: without this, an anonymous GET /sse or POST /message
+    // throws "redisUrl is required" in an unawaited promise and kills the process.
+    disableSse: true,
   }
 );
 

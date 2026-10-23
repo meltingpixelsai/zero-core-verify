@@ -7,4 +7,4 @@ dist/
 .mcpregistry_*
 
 # x402 settle-first payment claims (runtime state)
-.x402-claims.jsonl*
+.x402-claims*
