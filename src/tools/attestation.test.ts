@@ -7,9 +7,13 @@ import { reportOutcome } from "./reporting.js";
 /** A query-builder stand-in that returns preset rows and records inserts. */
 function fakeSupabase(rows: Record<string, unknown>[] = []) {
   const inserted: Record<string, unknown>[] = [];
+  const eqs: Array<[string, unknown]> = [];
   const builder = {
     select: () => builder,
-    eq: () => builder,
+    eq: (column: string, value: unknown) => {
+      eqs.push([column, value]);
+      return builder;
+    },
     not: () => builder,
     order: () => builder,
     limit: () => builder,
@@ -20,7 +24,7 @@ function fakeSupabase(rows: Record<string, unknown>[] = []) {
     then: (resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
       Promise.resolve({ data: rows, error: null }).then(resolve, reject),
   };
-  return { sb: { from: () => builder } as unknown as SupabaseClient, inserted };
+  return { sb: { from: () => builder } as unknown as SupabaseClient, inserted, eqs };
 }
 
 const row = (wallet: string, format: boolean | null, sla: boolean | null) => ({
@@ -89,6 +93,28 @@ test("the trend compares pass rates over every row, so failures code caught coun
   assert.equal((await getServiceQuality("svc", fakeSupabase([...passes("new"), ...fails("old")]).sb)).recent_trend, "improving");
   assert.equal((await getServiceQuality("svc", fakeSupabase([...passes("new"), ...passes("old")]).sb)).recent_trend, "stable");
   assert.equal((await getServiceQuality("svc", fakeSupabase(passes("only").slice(0, 5)).sb)).recent_trend, "insufficient_data");
+});
+
+test("the trend needs more than a 10-point move", async () => {
+  // Newest first: 6 of the newer 10 passed, 5 of the older 10.
+  const rows = Array.from({ length: 20 }, (_, i) => ({ ...row(`W${i}`, true, null), overall_pass: i < 10 ? i < 6 : i < 15 }));
+  assert.equal((await getServiceQuality("svc", fakeSupabase(rows).sb)).recent_trend, "stable");
+});
+
+test("inconclusive rows are counted, and still count as not passed", async () => {
+  const inconclusive = { ...row("B", true, null), completeness_score: null, accuracy_score: null, overall_pass: false };
+  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), inconclusive, codeFailed("C")]).sb);
+  assert.equal(q.inconclusive_verifications, 1, "a row code failed is not inconclusive");
+  assert.equal(q.pass_rate, 33);
+});
+
+test("service ids are stored and looked up without control characters", async () => {
+  const { sb, inserted, eqs } = fakeSupabase();
+  await reportOutcome({ service_id: "svc\u0000one", was_successful: false, notes: "bad\u0001note" }, "WalletA", sb);
+  assert.equal(inserted[0].service_id, "svcone");
+  assert.equal(inserted[0].request_description, "badnote");
+  await getServiceQuality("svc\u0000one", sb);
+  assert.deepEqual(eqs.find(([column]) => column === "service_id"), ["service_id", "svcone"]);
 });
 
 test("a report claims nothing about format or response time", async () => {

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase } from "../lib/supabase-client.js";
+import { safeText } from "../lib/output-checks.js";
 import { randomUUID } from "crypto";
 
 interface ReportInput {
@@ -25,8 +26,9 @@ export async function reportOutcome(
 
   const { error } = await sb.from("verification_results").insert({
     verification_id: reportId,
-    service_id: input.service_id,
-    request_description: input.notes || "Outcome report",
+    // No control characters or lone surrogates (a NUL would fail the insert); quality looks service_id up the same way.
+    service_id: safeText(input.service_id, 200),
+    request_description: (input.notes && safeText(input.notes, 2_000)) || "Outcome report",
     completeness_score: input.was_successful ? 100 : 0,
     accuracy_score: input.was_successful ? 100 : 0,
     // A report is the reporter's word only: nothing here checked a format or measured a time against a limit.

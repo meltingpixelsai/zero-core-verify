@@ -17,8 +17,8 @@ interface VerificationInput {
 interface VerificationResult {
   verification_id: string;
   verdict: "pass" | "fail" | "inconclusive";
-  /** "code": code's checks failed it and the judge was not asked; "code+judge": code checked something and the
-   * judge scored the rest; "judge": nothing code could check was given, so only the advisory judge decided. */
+  /** "code": code's checks failed it and the judge was not asked; "code+judge": code passed the format or the time
+   * and the judge scored the rest; "judge": code could vouch for neither, so only the advisory judge decided. */
   decided_by: "code" | "code+judge" | "judge";
   /** The judge's scores; null when it did not score (code failed the response first, or it gave no usable reply). */
   completeness_score: number | null;
@@ -96,7 +96,8 @@ export async function verifyOutcome(
   const verificationId = `ver_${randomUUID().slice(0, 12)}`;
   const checks = runOutputChecks(input);
   const codeFailed = checks.format_compliance === false || checks.sla_met === false;
-  const codeChecked = checks.format_compliance !== null || checks.sla_met !== null || checks.required_present !== null;
+  // Code vouched for something only when it reached a verdict on the format or the time.
+  const codeChecked = checks.format_compliance !== null || checks.sla_met !== null;
 
   let result: VerificationResult;
   if (codeFailed) {
@@ -165,7 +166,7 @@ export async function verifyOutcome(
     const sb = deps.sb ?? getSupabase();
     sb.from("verification_results").insert({
       verification_id: verificationId,
-      service_id: input.service_id || null,
+      service_id: (input.service_id && safeText(input.service_id, 200)) || null,
       request_description: safeText(input.request_description, 8_000),
       completeness_score: result.completeness_score,
       accuracy_score: result.accuracy_score,

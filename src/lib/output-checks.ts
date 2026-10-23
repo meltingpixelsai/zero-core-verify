@@ -9,11 +9,11 @@
  * expected_schema can be a JSON Schema (the subset below) or a list of two or
  * more required top-level field names ("name, price, url"). Anything else is
  * prose and is not checked by code. format_compliance is false only for a
- * definite failure, true only when code checked everything the schema says,
- * and null when it could not (unsupported keywords, too much work, prose).
- * Where a keyword could excuse what a checked keyword refuses (nullable,
- * patternProperties, prefixItems, $ref), code reports no failure it might
- * excuse.
+ * response that fails under every reasonable reading of the schema, true only
+ * when code checked everything the schema says, and null otherwise: unsupported
+ * keywords, too much work, prose, a keyword that could excuse what a checked
+ * keyword refuses (nullable, patternProperties, prefixItems, $ref, allOf and
+ * the like), or a response with no content to vouch for.
  *
  * The schema is compiled once and every check is counted against a work
  * budget, so a crafted schema and response cannot hold the server.
@@ -56,6 +56,8 @@ const FORMAT_WORDS = new Set(["json", "xml", "html", "markdown", "md", "text", "
 const FIELD_NAME = /^[A-Za-z_][\w-]*$/;
 /** Draft 7 and older ignore every other keyword beside these, so nothing at such a node can fail definitely. */
 const REF_KEYWORDS = ["$ref", "$dynamicRef", "$recursiveRef"];
+/** Keywords that can declare properties of their own, which a caller may expect additionalProperties false to allow. */
+const COMPOSITION = ["allOf", "anyOf", "oneOf", "if", "then", "else", "dependentSchemas", "dependencies"];
 const MAX_DEPTH = 32;
 const MAX_SCHEMA_NODES = 2_000;
 const MAX_ISSUES = 20;
@@ -91,7 +93,7 @@ export function safeText(text: string, max = 300): string {
   for (const ch of text) {
     const code = ch.codePointAt(0) ?? 0;
     if ((code < 0x20 && ch !== "\n" && ch !== "\t") || code === 0x7f) continue;
-    const safe = code >= 0xd800 && code <= 0xdfff ? "�" : ch;
+    const safe = code >= 0xd800 && code <= 0xdfff ? "\ufffd" : ch;
     if (out.length + safe.length > max) break;
     out += safe;
   }
@@ -100,6 +102,18 @@ export function safeText(text: string, max = 300): string {
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isPrimitive = (v: unknown): boolean => v === null || ["string", "number", "boolean"].includes(typeof v);
+
+/** No content: null, a blank string, an empty list, or an object with no keys. */
+function isEmptyValue(v: unknown): boolean {
+  if (v === null) return true;
+  if (typeof v === "string") return v.trim() === "";
+  if (Array.isArray(v)) return v.length === 0;
+  if (isPlainObject(v)) {
+    for (const key in v) if (Object.hasOwn(v, key)) return false;
+    return true;
+  }
+  return false;
+}
 
 /** True when `value` looks like a JSON Schema we can read: every schema keyword present has the right shape. */
 function looksLikeSchema(value: unknown): value is Record<string, unknown> {
@@ -148,6 +162,35 @@ function fieldList(names: string[]): SchemaSpec {
   if (fields.every((f) => FORMAT_WORDS.has(f.toLowerCase()))) return { kind: "prose", reason: "the list names formats, not fields" };
   if (!fields.every((f) => FIELD_NAME.test(f))) return { kind: "prose", reason: "a name is not a plain field name (a dot may mean a nested path)" };
   return { kind: "fields", fields };
+}
+
+/** The text inside a ``` code fence, or null when the text is not one. Linear: no pattern over the body. */
+function unfence(text: string): string | null {
+  const t = text.trim();
+  const firstLine = t.indexOf("\n");
+  if (!t.startsWith("```") || !t.endsWith("```") || firstLine < 0 || t.length - 3 < firstLine + 1) return null;
+  // The opening line may name a language ("```json") and nothing else.
+  if (!/^```[A-Za-z0-9_-]*[ \t\r]*$/.test(t.slice(0, firstLine))) return null;
+  return t.slice(firstLine + 1, -3);
+}
+
+/**
+ * The response parsed as JSON. A leading byte-order mark is skipped (RFC 8259 lets a parser ignore it). JSON inside
+ * a code fence is read too, but `fenced` says so: a strict reading calls a fenced response "not JSON".
+ */
+function parseResponse(text: string): { value: unknown; fenced: boolean } | null {
+  const body = text.startsWith("\ufeff") ? text.slice(1) : text;
+  try {
+    return { value: JSON.parse(body), fenced: false };
+  } catch {
+    const inner = unfence(body);
+    if (inner === null) return null;
+    try {
+      return { value: JSON.parse(inner), fenced: true };
+    } catch {
+      return null;
+    }
+  }
 }
 
 function anyNode(): Compiled {
@@ -229,7 +272,17 @@ function compile(schema: Record<string, unknown>, depth: number, ctx: CompileCon
         ctx.unsupported.add(safeText(key, 40));
     }
   }
-  if (patterned) node.noExtraProperties = false;
+  // additionalProperties false only sees this node's properties, but a caller may expect it to allow properties
+  // that patterns or allOf-style keywords declare; code does not evaluate those, so it refuses no key here.
+  if (patterned || COMPOSITION.some((k) => Object.hasOwn(schema, k))) node.noExtraProperties = false;
+  if (node.noExtraProperties) {
+    // A required name that properties leaves out makes the schema unsatisfiable as written; read it as allowed.
+    for (const name of node.required) {
+      if (node.properties.has(name)) continue;
+      node.properties.set(name, anyNode());
+      ctx.unsupported.add("required names that additionalProperties false leaves out");
+    }
+  }
   return node;
 }
 
@@ -240,8 +293,9 @@ function typeOf(value: unknown): string {
 }
 
 function matchesType(value: unknown, type: string): boolean {
-  if (type === "integer") return typeof value === "number" && Number.isInteger(value);
-  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  // A number too large for a double (1e400) parses as Infinity: still a JSON number, and an integer.
+  if (type === "integer") return typeof value === "number" && (Number.isInteger(value) || !Number.isFinite(value));
+  if (type === "number") return typeof value === "number";
   return typeOf(value) === type;
 }
 
@@ -295,13 +349,28 @@ class Checker {
         const child = node.properties.get(name);
         if (child) this.validate(value[name], child, `${where}.${name}`);
         else if (node.noExtraProperties) this.issue(`${where}.${name}: not allowed by the schema`);
-        if (this.exhausted) return;
       }
     }
     if (Array.isArray(value) && node.items) {
       for (let i = node.itemsFrom; i < value.length; i++) {
         this.validate(value[i], node.items, `${where}[${i}]`);
         if (this.exhausted) return;
+      }
+    }
+  }
+
+  /** A field list read as "a list of records with these fields": each record must be an object that has them. */
+  records(list: unknown[], fields: string[]): void {
+    for (let i = 0; i < list.length; i++) {
+      if (!this.spend()) return;
+      const record = list[i];
+      if (!isPlainObject(record)) {
+        this.issue(`$[${i}]: expected an object with ${fields.join(", ")}, got ${typeOf(record)}`);
+        continue;
+      }
+      for (const name of fields) {
+        if (!this.spend()) return;
+        if (!Object.hasOwn(record, name)) this.issue(`$[${i}].${name}: missing`);
       }
     }
   }
@@ -321,20 +390,16 @@ export function runOutputChecks(input: OutputCheckInput): OutputChecks {
     const root = spec.kind === "json-schema" ? compile(spec.schema, 0, ctx) : null;
     // Deduplicated, so counting them costs at most the schema's size.
     const required = spec.kind === "fields" ? spec.fields : (root?.required ?? []);
-    let value: unknown;
-    let isJson = true;
-    try {
-      value = JSON.parse(input.response_data);
-    } catch {
-      isJson = false;
-    }
-    if (!isJson) {
+    const parsed = parseResponse(input.response_data);
+    if (!parsed) {
       out.format_compliance = false;
       out.issues.push("response_data is not valid JSON");
       out.checked.push("format: the response is not JSON");
       if (required.length) out.required_present = 0;
     } else {
+      const { value } = parsed;
       const checker = new Checker();
+      if (parsed.fenced) checker.uncertain.add("the JSON came inside a code fence");
       // Required fields apply only to an object: a value that is not one has none present only where an object is a must.
       let mustBeObject = true;
       if (root) {
@@ -342,9 +407,23 @@ export function runOutputChecks(input: OutputCheckInput): OutputChecks {
         out.checked.push("format: validated against the JSON Schema");
         mustBeObject = root.types?.size === 1 && root.types.has("object") && !(value === null && root.nullable);
       } else if (spec.kind === "fields") {
-        if (!isPlainObject(value)) checker.issue(`$: expected an object with ${spec.fields.join(", ")}, got ${typeOf(value)}`);
-        else for (const name of spec.fields) if (!Object.hasOwn(value, name)) checker.issue(`$.${name}: missing`);
+        if (Array.isArray(value)) {
+          // Maybe the caller meant a list of records with these fields. A record without them fails under either
+          // reading; records that all have them still fail the single-object reading, so that is neither.
+          checker.records(value, spec.fields);
+          checker.uncertain.add("the response is a list; each record was checked for the fields");
+          mustBeObject = false;
+        } else if (!isPlainObject(value)) {
+          checker.issue(`$: expected an object with ${spec.fields.join(", ")}, got ${typeOf(value)}`);
+        } else {
+          for (const name of spec.fields) if (!Object.hasOwn(value, name)) checker.issue(`$.${name}: missing`);
+        }
         out.checked.push(`format: required fields ${spec.fields.join(", ")}`);
+      }
+      // Shape without content is not something code can vouch for: the judge alone decides it.
+      if (isEmptyValue(value)) checker.uncertain.add("the response is empty");
+      else if (required.length && isPlainObject(value) && required.every((name) => Object.hasOwn(value, name) && isEmptyValue(value[name]))) {
+        checker.uncertain.add("every required field is empty");
       }
       if (ctx.tooBig) out.not_checked.push(`format: the schema is larger or deeper than code checks (${MAX_SCHEMA_NODES} nodes, ${MAX_DEPTH} levels); the rest was not checked`);
       if (checker.exhausted) out.not_checked.push("format: the check stopped at its work limit");

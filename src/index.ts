@@ -160,7 +160,7 @@ const createPaidHandler = () => createMcpPaidHandler(
 
     paidTool(
       "get_service_quality",
-      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns the pass rate (overall, and over the rows where code checked the format or a measured time), average completeness and accuracy over the scored rows with their count, format and SLA compliance rates, and a trend by pass rate. The scores are self-reported by paying wallets and not attested: nothing proves a reporter used the service.",
+      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns the pass rate (overall, and over the rows where code checked the format or a measured time), average completeness and accuracy over the scored rows with their count, the count of inconclusive rows, format and SLA compliance rates, and a trend by pass rate. The scores are self-reported by paying wallets and not attested: nothing proves a reporter used the service.",
       "$0.005",
       {
         service_id: z.string().max(200).describe("Service identifier to query (e.g. 'harvey-tools/scrape_url')"),

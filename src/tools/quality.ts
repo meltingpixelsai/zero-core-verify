@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase } from "../lib/supabase-client.js";
+import { safeText } from "../lib/output-checks.js";
 
 interface ServiceQuality {
   service_id: string;
@@ -12,10 +13,13 @@ interface ServiceQuality {
   avg_completeness: number | null;
   avg_accuracy: number | null;
   pass_rate: number;
-  /** Rows where code checked the format or a measured time, and the pass rate over them (null when none). A pass
-   * in the other rows rests on the AI judge, or on a reporter's word, alone. */
+  /** Rows where code passed or failed the format (a schema or required fields) or a measured time, and the pass
+   * rate over them (null when none). A pass in the other rows rests on the AI judge, or a reporter's word, alone. */
   code_checked_verifications: number;
   code_checked_pass_rate: number | null;
+  /** Rows the judge gave no usable answer for. They count as not passed: otherwise a judged service could turn a
+   * failure into a gap by confusing the judge. Many of them can also mean the judge was down. */
+  inconclusive_verifications: number;
   /** Over the rows where code checked the format; null when none did. */
   format_compliance_rate: number | null;
   /** Over the rows where code checked a measured time; null when none did. */
@@ -61,7 +65,7 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
   const { data: rows, error } = await sb
     .from("verification_latest_by_reporter")
     .select("completeness_score, accuracy_score, format_compliance, sla_met, overall_pass, created_at, reporter_wallet")
-    .eq("service_id", serviceId)
+    .eq("service_id", safeText(serviceId, 200))
     .not("reporter_wallet", "is", null)
     .order("created_at", { ascending: false })
     .limit(100);
@@ -86,6 +90,7 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
       pass_rate: 0,
       code_checked_verifications: 0,
       code_checked_pass_rate: null,
+      inconclusive_verifications: 0,
       format_compliance_rate: null,
       sla_compliance_rate: null,
       recent_trend: "insufficient_data",
@@ -119,6 +124,8 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
     pass_rate: passRate(data),
     code_checked_verifications: codeChecked.length,
     code_checked_pass_rate: codeChecked.length ? passRate(codeChecked) : null,
+    // No score and no code failure: the judge was asked and gave nothing usable (reports always carry scores).
+    inconclusive_verifications: data.filter((r) => r.accuracy_score === null && r.format_compliance !== false && r.sla_met !== false).length,
     format_compliance_rate: checkedRate(data, "format_compliance"),
     sla_compliance_rate: checkedRate(data, "sla_met"),
     recent_trend: trend,
