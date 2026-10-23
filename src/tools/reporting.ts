@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase } from "../lib/supabase-client.js";
 import { randomUUID } from "crypto";
 
@@ -14,10 +15,13 @@ interface ReportResult {
   recorded: boolean;
 }
 
-/** Simple outcome report - no LLM, just records pass/fail */
-export async function reportOutcome(input: ReportInput): Promise<ReportResult> {
+/** Simple outcome report - no LLM, just records pass/fail, stamped with the paying wallet */
+export async function reportOutcome(
+  input: ReportInput,
+  reporterWallet: string,
+  sb: SupabaseClient = getSupabase()
+): Promise<ReportResult> {
   const reportId = `rpt_${randomUUID().slice(0, 12)}`;
-  const sb = getSupabase();
 
   const { error } = await sb.from("verification_results").insert({
     verification_id: reportId,
@@ -32,6 +36,7 @@ export async function reportOutcome(input: ReportInput): Promise<ReportResult> {
     summary: input.was_successful ? "Agent reported successful outcome" : "Agent reported failed outcome",
     response_time_ms: input.response_time_ms || null,
     verification_type: "report",
+    reporter_wallet: reporterWallet,
   });
 
   if (error) throw new Error(`Failed to record report: ${error.message}`);
