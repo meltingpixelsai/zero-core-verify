@@ -64,6 +64,8 @@ const MAX_ISSUES = 20;
 const MAX_FIELDS = 100;
 /** Value, key and field checks allowed per response; past this, format is "not checked". */
 const WORK_BUDGET = 200_000;
+/** Values the no-content test looks at before it assumes the response has content. */
+const MAX_CONTENT_WALK = 10_000;
 
 interface Compiled {
   /** Accepts anything: a $ref, a `true` schema, or a part of the schema past the size limits. */
@@ -103,16 +105,33 @@ export function safeText(text: string, max = 300): string {
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isPrimitive = (v: unknown): boolean => v === null || ["string", "number", "boolean"].includes(typeof v);
 
-/** No content: null, a blank string, an empty list, or an object with no keys. */
-function isEmptyValue(v: unknown): boolean {
-  if (v === null) return true;
-  if (typeof v === "string") return v.trim() === "";
-  if (Array.isArray(v)) return v.length === 0;
-  if (isPlainObject(v)) {
-    for (const key in v) if (Object.hasOwn(v, key)) return false;
-    return true;
+/** Characters that show nothing: whitespace, format characters such as the zero-width space, and the Hangul and
+ * Braille fillers. */
+const INVISIBLE = /[\s\p{Cf}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}]/gu;
+
+/**
+ * True when nothing inside carries content: only null, blank strings, and lists or objects of those. A number or a
+ * boolean is content. Walks without recursion, and gives up (false) past MAX_CONTENT_WALK values.
+ */
+function hasNoContent(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  for (let seen = 0; stack.length > 0; seen++) {
+    if (seen > MAX_CONTENT_WALK) return false;
+    const v = stack.pop();
+    if (v === null) continue;
+    if (typeof v === "string") {
+      if (v.replace(INVISIBLE, "") === "") continue;
+      return false;
+    }
+    if (Array.isArray(v)) {
+      for (const item of v) stack.push(item);
+    } else if (isPlainObject(v)) {
+      for (const key in v) if (Object.hasOwn(v, key)) stack.push(v[key]);
+    } else {
+      return false;
+    }
   }
-  return false;
+  return true;
 }
 
 /** True when `value` looks like a JSON Schema we can read: every schema keyword present has the right shape. */
@@ -164,26 +183,43 @@ function fieldList(names: string[]): SchemaSpec {
   return { kind: "fields", fields };
 }
 
-/** The text inside a ``` code fence, or null when the text is not one. Linear: no pattern over the body. */
-function unfence(text: string): string | null {
-  const t = text.trim();
-  const firstLine = t.indexOf("\n");
-  if (!t.startsWith("```") || !t.endsWith("```") || firstLine < 0 || t.length - 3 < firstLine + 1) return null;
-  // The opening line may name a language ("```json") and nothing else.
-  if (!/^```[A-Za-z0-9_-]*[ \t\r]*$/.test(t.slice(0, firstLine))) return null;
-  return t.slice(firstLine + 1, -3);
+/**
+ * The body of the one fenced code block in the text, or null when it has none or several. A fence is a line of
+ * three or more backticks or tildes, as in CommonMark: a backtick fence's info string ("json title=x") holds no
+ * backtick, and the block closes on a line of at least as many of the same character. Linear, line by line.
+ */
+function fencedBlock(text: string): string | null {
+  const lines = text.split("\n");
+  let fence = "";
+  let start = -1;
+  let body: string | null = null;
+  let blocks = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!fence) {
+      const opener = line.match(/^(?:`{3,}|~{3,})/);
+      if (!opener || (opener[0][0] === "`" && line.slice(opener[0].length).includes("`"))) continue;
+      fence = opener[0];
+      start = i;
+    } else if (line.length >= fence.length && line.split("").every((c) => c === fence[0])) {
+      if (++blocks === 1) body = lines.slice(start + 1, i).join("\n");
+      fence = "";
+    }
+  }
+  return blocks === 1 ? body : null;
 }
 
 /**
- * The response parsed as JSON. A leading byte-order mark is skipped (RFC 8259 lets a parser ignore it). JSON inside
- * a code fence is read too, but `fenced` says so: a strict reading calls a fenced response "not JSON".
+ * The response parsed as JSON. A leading byte-order mark is skipped: RFC 8259 lets a parser ignore it, so that is
+ * still JSON. JSON in the response's one code fence is read too, but `fenced` says so: no reading makes a fenced
+ * response JSON, only a lenient one makes its content the response.
  */
 function parseResponse(text: string): { value: unknown; fenced: boolean } | null {
   const body = text.startsWith("\ufeff") ? text.slice(1) : text;
   try {
     return { value: JSON.parse(body), fenced: false };
   } catch {
-    const inner = unfence(body);
+    const inner = fencedBlock(body);
     if (inner === null) return null;
     try {
       return { value: JSON.parse(inner), fenced: true };
@@ -420,9 +456,10 @@ export function runOutputChecks(input: OutputCheckInput): OutputChecks {
         }
         out.checked.push(`format: required fields ${spec.fields.join(", ")}`);
       }
-      // Shape without content is not something code can vouch for: the judge alone decides it.
-      if (isEmptyValue(value)) checker.uncertain.add("the response is empty");
-      else if (required.length && isPlainObject(value) && required.every((name) => Object.hasOwn(value, name) && isEmptyValue(value[name]))) {
+      // Shape without content is not something code can vouch for: the judge alone decides it. This catches the
+      // degenerate case only; one junk character is content, and judging content is the judge's job.
+      if (hasNoContent(value)) checker.uncertain.add("the response has no content");
+      else if (required.length && isPlainObject(value) && required.every((name) => Object.hasOwn(value, name)) && hasNoContent(required.map((name) => value[name]))) {
         checker.uncertain.add("every required field is empty");
       }
       if (ctx.tooBig) out.not_checked.push(`format: the schema is larger or deeper than code checks (${MAX_SCHEMA_NODES} nodes, ${MAX_DEPTH} levels); the rest was not checked`);

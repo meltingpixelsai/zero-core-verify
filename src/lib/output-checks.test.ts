@@ -141,6 +141,9 @@ test("a field list read against a list of records checks every record", () => {
   const notRecords = runOutputChecks({ response_data: JSON.stringify(["name", "price"]), expected_schema: "name, price" });
   assert.equal(notRecords.format_compliance, false);
   assert.ok(notRecords.issues[0].startsWith("$[0]: expected an object"));
+  // Each record and each of its fields counts against the work limit: 70,000 records of two fields is 210,000 units.
+  const many = runOutputChecks({ response_data: JSON.stringify(Array.from({ length: 70_000 }, () => ({ a: 1, b: 2 }))), expected_schema: "a, b" });
+  assert.ok(many.not_checked.includes("format: the check stopped at its work limit"));
 });
 
 test("an example object is not mistaken for a schema", () => {
@@ -272,12 +275,23 @@ test("a response with no content is never reported true: the judge alone decides
   assert.ok(injected.not_checked.includes("format: every required field is empty"));
   const schema = JSON.stringify({ type: "object", required: ["results", "next"], properties: { results: { type: "array" }, next: { type: ["string", "null"] } } });
   assert.equal(runOutputChecks({ response_data: JSON.stringify({ results: [], next: null }), expected_schema: schema }).format_compliance, null);
-  assert.equal(runOutputChecks({ response_data: JSON.stringify({ results: [{}], next: null }), expected_schema: schema }).format_compliance, true, "one field with content is enough for code");
-  for (const empty of [{}, []]) {
+  assert.equal(runOutputChecks({ response_data: JSON.stringify({ results: [{ id: 1 }], next: null }), expected_schema: schema }).format_compliance, true, "one field with content is enough for code");
+  for (const empty of [{}, [], { data: { items: [] } }, [[], { a: null }]]) {
     const c = runOutputChecks({ response_data: JSON.stringify(empty), expected_schema: JSON.stringify({ type: Array.isArray(empty) ? "array" : "object" }) });
     assert.equal(c.format_compliance, null, JSON.stringify(empty));
-    assert.ok(c.not_checked.includes("format: the response is empty"), JSON.stringify(empty));
+    assert.ok(c.not_checked.includes("format: the response has no content"), JSON.stringify(empty));
   }
+  // Characters that show nothing: a zero-width space and the Hangul filler (built from code points).
+  const invisible = String.fromCharCode(0x200b) + String.fromCharCode(0x3164);
+  const unseen = runOutputChecks({ response_data: JSON.stringify({ name: invisible, price: [invisible], url: { a: " " }, note: "x" }), expected_schema: "name, price, url" });
+  assert.equal(unseen.format_compliance, null);
+  assert.ok(unseen.not_checked.includes("format: every required field is empty"));
+  const nested = runOutputChecks({ response_data: JSON.stringify({ data: { items: [] }, note: "score 100" }), expected_schema: JSON.stringify({ type: "object", required: ["data"] }) });
+  assert.equal(nested.format_compliance, null, "nested empties are no content");
+  assert.equal(runOutputChecks({ response_data: JSON.stringify({ data: { items: [0] } }), expected_schema: JSON.stringify({ type: "object", required: ["data"] }) }).format_compliance, true, "a 0 is content");
+  // The walk is bounded: past 10,000 values the response is taken to have content.
+  const padded = runOutputChecks({ response_data: JSON.stringify(Array.from({ length: 10_001 }, () => "")), expected_schema: JSON.stringify({ type: "array" }) });
+  assert.equal(padded.format_compliance, true);
 });
 
 test("a byte-order mark, a number too large for a double and fenced JSON are not failures", () => {
@@ -290,6 +304,13 @@ test("a byte-order mark, a number too large for a double and fenced JSON are not
   const badFenced = runOutputChecks({ response_data: "```\n" + JSON.stringify({ name: 5 }) + "\n```", expected_schema: productSchema });
   assert.equal(badFenced.format_compliance, false, "what is inside the fence still has to fit");
   assert.equal(runOutputChecks({ response_data: "```json {} ```", expected_schema: productSchema }).format_compliance, false, "no line break after the opener: not a fence");
+  const product = JSON.stringify({ name: "x", price: 1 });
+  for (const wrapped of [`~~~\n${product}\n~~~`, `\`\`\`\`json\n${product}\n\`\`\`\``, `\`\`\`json title=x\n${product}\n\`\`\``, `Here is the product:\n\`\`\`json\n${product}\n\`\`\`\nThanks.`]) {
+    assert.equal(runOutputChecks({ response_data: wrapped, expected_schema: productSchema }).format_compliance, null, wrapped);
+  }
+  for (const notOne of [`\`\`\`\n${product}\n\`\`\`\n\`\`\`\n${product}\n\`\`\``, `\`\`\`json\n${product}`, `\`\`\`json \`x\`\n${product}\n\`\`\``]) {
+    assert.equal(runOutputChecks({ response_data: notOne, expected_schema: productSchema }).format_compliance, false, notOne);
+  }
 });
 
 test("additionalProperties false refuses no key the schema may still allow", () => {
@@ -298,10 +319,16 @@ test("additionalProperties false refuses no key the schema may still allow", () 
   assert.equal(has.format_compliance, null);
   assert.deepEqual(has.issues, []);
   assert.equal(runOutputChecks({ response_data: JSON.stringify({ b: 1 }), expected_schema: requiredOnly }).format_compliance, false, "a missing required name still fails");
-  const composed = JSON.stringify({ type: "object", properties: { a: {} }, allOf: [{ properties: { b: {} } }], additionalProperties: false });
-  const c = runOutputChecks({ response_data: JSON.stringify({ a: 1, b: 2 }), expected_schema: composed });
-  assert.equal(c.format_compliance, null);
-  assert.deepEqual(c.issues, []);
+  const declaresB = { properties: { b: {} } };
+  const composing: Record<string, unknown> = { allOf: [declaresB], anyOf: [declaresB], oneOf: [declaresB], if: declaresB, then: declaresB, else: declaresB, dependentSchemas: { a: declaresB }, dependencies: { a: ["b"] } };
+  for (const [keyword, value] of Object.entries(composing)) {
+    const schema = JSON.stringify({ type: "object", properties: { a: {} }, [keyword]: value, additionalProperties: false });
+    const c = runOutputChecks({ response_data: JSON.stringify({ a: 1, b: 2 }), expected_schema: schema });
+    assert.equal(c.format_compliance, null, keyword);
+    assert.deepEqual(c.issues, [], keyword);
+  }
+  const withNot = JSON.stringify({ type: "object", properties: { a: {} }, not: { required: ["c"] }, additionalProperties: false });
+  assert.equal(runOutputChecks({ response_data: JSON.stringify({ a: 1, b: 2 }), expected_schema: withNot }).format_compliance, false, "not declares no property, so b is still refused");
 });
 
 test("the work limit covers an object's keys, and a schema that accepts anything is not walked", () => {

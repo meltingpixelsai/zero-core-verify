@@ -103,9 +103,10 @@ test("the trend needs more than a 10-point move", async () => {
 
 test("inconclusive rows are counted, and still count as not passed", async () => {
   const inconclusive = { ...row("B", true, null), completeness_score: null, accuracy_score: null, overall_pass: false };
-  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), inconclusive, codeFailed("C")]).sb);
-  assert.equal(q.inconclusive_verifications, 1, "a row code failed is not inconclusive");
-  assert.equal(q.pass_rate, 33);
+  const lateByCode = { ...row("D", null, false), completeness_score: null, accuracy_score: null, overall_pass: false };
+  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), inconclusive, codeFailed("C"), lateByCode]).sb);
+  assert.equal(q.inconclusive_verifications, 1, "rows code failed, on format or on time, are not inconclusive");
+  assert.equal(q.pass_rate, 25);
 });
 
 test("service ids are stored and looked up without control characters", async () => {
