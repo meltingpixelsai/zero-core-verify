@@ -38,14 +38,14 @@ export function registerDiscoveryRoutes(app: Hono): void {
 const LLMS_TXT = `# Harvey Verify - Agent Outcome Verification MCP Server
 
 > MCP server for AI agents. Post-transaction verification - check if services delivered what was promised.
-> LLM-as-judge scoring with quality database. Pay per call with USDC via x402 micropayments. No account needed.
+> Code-checked verification with an advisory AI judge, and self-reported quality scores. Pay per call with USDC via x402 micropayments. No account needed.
 > Built by MeltingPixels.
 
 ## Tools (5 total, 2 free + 3 paid)
 - [list_tools](https://verify.rugslayer.com/mcp): List all tools with pricing (FREE)
 - [health](https://verify.rugslayer.com/mcp): Server status and payment config (FREE)
-- [verify_outcome](https://verify.rugslayer.com/mcp): LLM-as-judge verification of service outcomes ($0.01)
-- [get_service_quality](https://verify.rugslayer.com/mcp): Aggregated quality scores for a service, one vote per paying wallet ($0.005)
+- [verify_outcome](https://verify.rugslayer.com/mcp): Code-checked verification of service outcomes, with an advisory AI judge ($0.01)
+- [get_service_quality](https://verify.rugslayer.com/mcp): Aggregated quality scores for a service, one vote per paying wallet; self-reported and unattested ($0.005)
 - [report_outcome](https://verify.rugslayer.com/mcp): Simple pass/fail outcome report ($0.002)
 
 ## Connection
@@ -65,7 +65,7 @@ const LLMS_TXT = `# Harvey Verify - Agent Outcome Verification MCP Server
 const AGENT_CARD = {
   name: "Harvey Verify",
   description:
-    "MCP server for AI agents providing post-transaction outcome verification. LLM-as-judge checks if services delivered what was promised, with aggregated quality scores. Pay per call with USDC via x402.",
+    "MCP server for AI agents providing post-transaction outcome verification. Code checks the response against the caller's schema and time limit, an advisory AI judge scores accuracy, and quality scores are self-reported. Pay per call with USDC via x402.",
   version: "1.0.0",
   supportedInterfaces: [
     {
@@ -98,7 +98,7 @@ const AGENT_CARD = {
     {
       id: "outcome-verification",
       name: "Outcome Verification",
-      description: "LLM-as-judge verification of service outcomes. Scores completeness, accuracy, format compliance, and SLA adherence.",
+      description: "Code-checked verification of service outcomes: format and SLA checked by code, accuracy and completeness scored by an advisory AI judge.",
       tags: ["verification", "quality", "llm-judge", "outcome"],
       examples: ["Verify this API response matches the request", "Check if the service output is correct"],
       inputModes: ["application/json"],
@@ -107,7 +107,7 @@ const AGENT_CARD = {
     {
       id: "service-quality",
       name: "Service Quality Scores",
-      description: "Aggregated quality metrics for any service - pass rate, average scores, trends.",
+      description: "Aggregated quality metrics for any service - pass rate, average scores, trends. Self-reported and unattested.",
       tags: ["quality", "reputation", "analytics", "scores"],
       examples: ["What's the quality score for this service?", "Show me the pass rate"],
       inputModes: ["application/json"],
@@ -130,7 +130,7 @@ const MCP_CARD = {
   name: "harvey-verify",
   display_name: "Harvey Verify - Agent Outcome Verification",
   description:
-    "MCP server for AI agents. Post-transaction verification using LLM-as-judge. Checks if services delivered what was promised, with quality database and service reputation scores. Pay per call with USDC via x402.",
+    "MCP server for AI agents. Post-transaction verification: code checks format and time limits, an advisory AI judge scores accuracy. Service quality scores are self-reported and unattested. Pay per call with USDC via x402.",
   version: "1.0.0",
   vendor: "MeltingPixels",
   homepage: "https://verify.rugslayer.com",
@@ -165,7 +165,7 @@ const MCP_CARD = {
     },
     {
       name: "verify_outcome",
-      description: "LLM-as-judge verification of a service outcome. Scores completeness, accuracy, format compliance.",
+      description: "Code-checked verification of a service outcome, with an advisory AI judge for accuracy and completeness.",
       price: "$0.01 USDC",
       input_schema: {
         type: "object",
@@ -181,7 +181,7 @@ const MCP_CARD = {
     },
     {
       name: "get_service_quality",
-      description: "Aggregated quality scores for a service counting each paying wallet once (its latest report).",
+      description: "Aggregated quality scores for a service counting each paying wallet once (its latest report); self-reported and unattested.",
       price: "$0.005 USDC",
       input_schema: {
         type: "object",

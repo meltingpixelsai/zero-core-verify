@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.meltingpixelsai/harvey-verify",
-  "description": "Post-transaction outcome verification. LLM-as-judge for agent service quality.",
+  "description": "Post-transaction outcome verification: code-checked format and time limits, with an advisory AI judge.",
   "repository": {
     "url": "https://github.com/meltingpixelsai/harvey-verify",
     "source": "github"
@@ -18,7 +18,7 @@
       },
       "environmentVariables": [
         {
-          "description": "xAI Grok API key for LLM-as-judge verification",
+          "description": "xAI Grok API key for the advisory AI judge",
           "isRequired": true,
           "format": "string",
           "isSecret": true,

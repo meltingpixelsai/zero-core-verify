@@ -29,8 +29,9 @@ export async function reportOutcome(
     request_description: input.notes || "Outcome report",
     completeness_score: input.was_successful ? 100 : 0,
     accuracy_score: input.was_successful ? 100 : 0,
-    format_compliance: input.was_successful,
-    sla_met: true,
+    // A report is the reporter's word only: nothing here checked a format or measured a time against a limit.
+    format_compliance: null,
+    sla_met: null,
     overall_pass: input.was_successful,
     issues: input.was_successful ? [] : ["Agent reported failure"],
     summary: input.was_successful ? "Agent reported successful outcome" : "Agent reported failed outcome",

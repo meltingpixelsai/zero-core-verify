@@ -9,10 +9,24 @@ interface ServiceQuality {
   avg_completeness: number;
   avg_accuracy: number;
   pass_rate: number;
-  format_compliance_rate: number;
-  sla_compliance_rate: number;
+  /** Over the rows where code checked the format; null when none did. */
+  format_compliance_rate: number | null;
+  /** Over the rows where code checked a measured time; null when none did. */
+  sla_compliance_rate: number | null;
   recent_trend: "improving" | "stable" | "declining" | "insufficient_data";
   last_verified_at: string | null;
+  /** Nothing proves a reporter used the service: any paying wallet can report. */
+  attestation: "unattested";
+  note: string;
+}
+
+const UNATTESTED_NOTE =
+  "Self-reported by paying wallets and not attested: nothing proves a reporter used the service, so treat these scores as unverified.";
+
+/** Percentage of rows where the field is true, counting only rows that checked it; null when none did. */
+function checkedRate(rows: Array<Record<string, unknown>>, field: string): number | null {
+  const checked = rows.filter((r) => r[field] === true || r[field] === false);
+  return checked.length ? Math.round((checked.filter((r) => r[field] === true).length / checked.length) * 100) : null;
 }
 
 /**
@@ -21,7 +35,8 @@ interface ServiceQuality {
  * outvote everyone else by reporting many times. The view
  * verification_latest_by_reporter keeps one row per (service_id,
  * reporter_wallet) in the database (DISTINCT ON), so no number of rows from one
- * wallet can push the others out of the query.
+ * wallet can push the others out of the query. The scores stay self-reported:
+ * every result says so (attestation "unattested").
  */
 export async function getServiceQuality(serviceId: string, sb: SupabaseClient = getSupabase()): Promise<ServiceQuality> {
   const { data: rows, error } = await sb
@@ -49,10 +64,12 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
       avg_completeness: 0,
       avg_accuracy: 0,
       pass_rate: 0,
-      format_compliance_rate: 0,
-      sla_compliance_rate: 0,
+      format_compliance_rate: null,
+      sla_compliance_rate: null,
       recent_trend: "insufficient_data",
       last_verified_at: null,
+      attestation: "unattested",
+      note: UNATTESTED_NOTE,
     };
   }
 
@@ -60,8 +77,8 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
   const avgCompleteness = Math.round(data.reduce((s, r) => s + (r.completeness_score ?? 0), 0) / total);
   const avgAccuracy = Math.round(data.reduce((s, r) => s + (r.accuracy_score ?? 0), 0) / total);
   const passRate = Math.round((data.filter((r) => r.overall_pass).length / total) * 100);
-  const formatRate = Math.round((data.filter((r) => r.format_compliance).length / total) * 100);
-  const slaRate = Math.round((data.filter((r) => r.sla_met).length / total) * 100);
+  const formatRate = checkedRate(data, "format_compliance");
+  const slaRate = checkedRate(data, "sla_met");
 
   // Calculate trend from recent vs older results
   let trend: "improving" | "stable" | "declining" | "insufficient_data" = "insufficient_data";
@@ -88,5 +105,7 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
     sla_compliance_rate: slaRate,
     recent_trend: trend,
     last_verified_at: data[0].created_at,
+    attestation: "unattested",
+    note: UNATTESTED_NOTE,
   };
 }
