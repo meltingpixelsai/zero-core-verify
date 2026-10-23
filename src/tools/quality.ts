@@ -6,14 +6,21 @@ interface ServiceQuality {
   total_verifications: number;
   /** Each paying wallet counts once: its latest report or verification. */
   distinct_reporters: number;
-  /** Over the rows that have the score; null when none does (rows code failed first carry no accuracy). */
+  /** Rows that carry scores (the judge's, or a reporter's 100 or 0); the averages cover only these. */
+  scored_verifications: number;
+  /** null when no row has the score (rows code failed first, or the judge did not score, carry none). */
   avg_completeness: number | null;
   avg_accuracy: number | null;
   pass_rate: number;
+  /** Rows where code checked the format or a measured time, and the pass rate over them (null when none). A pass
+   * in the other rows rests on the AI judge, or on a reporter's word, alone. */
+  code_checked_verifications: number;
+  code_checked_pass_rate: number | null;
   /** Over the rows where code checked the format; null when none did. */
   format_compliance_rate: number | null;
   /** Over the rows where code checked a measured time; null when none did. */
   sla_compliance_rate: number | null;
+  /** The pass rate of the newer half of the rows against the older half. */
   recent_trend: "improving" | "stable" | "declining" | "insufficient_data";
   last_verified_at: string | null;
   /** Nothing proves a reporter used the service: any paying wallet can report. */
@@ -24,17 +31,22 @@ interface ServiceQuality {
 const UNATTESTED_NOTE =
   "Self-reported by paying wallets and not attested: nothing proves a reporter used the service, so treat these scores as unverified.";
 
+type Row = Record<string, unknown>;
+
 /** Rounded mean of a score over the rows that have it; null when none does. */
-function averageOf(rows: Array<Record<string, unknown>>, field: string): number | null {
+function averageOf(rows: Row[], field: string): number | null {
   const values = rows.map((r) => r[field]).filter((v): v is number => typeof v === "number");
   return values.length ? Math.round(values.reduce((s, v) => s + v, 0) / values.length) : null;
 }
 
 /** Percentage of rows where the field is true, counting only rows that checked it; null when none did. */
-function checkedRate(rows: Array<Record<string, unknown>>, field: string): number | null {
+function checkedRate(rows: Row[], field: string): number | null {
   const checked = rows.filter((r) => r[field] === true || r[field] === false);
   return checked.length ? Math.round((checked.filter((r) => r[field] === true).length / checked.length) * 100) : null;
 }
+
+/** Percentage of rows that passed; 0 for none. */
+const passRate = (rows: Row[]): number => (rows.length ? Math.round((rows.filter((r) => r.overall_pass === true).length / rows.length) * 100) : 0);
 
 /**
  * Get aggregated quality scores for a service. Each paying wallet counts once
@@ -68,9 +80,12 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
       service_id: serviceId,
       total_verifications: 0,
       distinct_reporters: 0,
+      scored_verifications: 0,
       avg_completeness: null,
       avg_accuracy: null,
       pass_rate: 0,
+      code_checked_verifications: 0,
+      code_checked_pass_rate: null,
       format_compliance_rate: null,
       sla_compliance_rate: null,
       recent_trend: "insufficient_data",
@@ -81,24 +96,16 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
   }
 
   const total = data.length;
-  const avgCompleteness = averageOf(data, "completeness_score");
-  const avgAccuracy = averageOf(data, "accuracy_score");
-  const passRate = Math.round((data.filter((r) => r.overall_pass).length / total) * 100);
-  const formatRate = checkedRate(data, "format_compliance");
-  const slaRate = checkedRate(data, "sla_met");
+  const codeChecked = data.filter((r) => typeof r.format_compliance === "boolean" || typeof r.sla_met === "boolean");
 
-  // Calculate trend from recent vs older results, over the rows that carry both scores
+  // Trend: the pass rate of the newer half of the rows (newest first) against the older half. Every row has a
+  // pass or a fail, so rows code failed before the judge scored them count too.
   let trend: "improving" | "stable" | "declining" | "insufficient_data" = "insufficient_data";
-  const scored = data.filter((r) => typeof r.completeness_score === "number" && typeof r.accuracy_score === "number");
-  if (scored.length >= 6) {
-    const half = Math.floor(scored.length / 2);
-    const recent = scored.slice(0, half);
-    const older = scored.slice(half);
-    const recentAvg = recent.reduce((s, r) => s + r.completeness_score + r.accuracy_score, 0) / (recent.length * 2);
-    const olderAvg = older.reduce((s, r) => s + r.completeness_score + r.accuracy_score, 0) / (older.length * 2);
-    const diff = recentAvg - olderAvg;
-    if (diff > 5) trend = "improving";
-    else if (diff < -5) trend = "declining";
+  if (total >= 6) {
+    const half = Math.floor(total / 2);
+    const diff = passRate(data.slice(0, half)) - passRate(data.slice(half));
+    if (diff > 10) trend = "improving";
+    else if (diff < -10) trend = "declining";
     else trend = "stable";
   }
 
@@ -106,11 +113,14 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
     service_id: serviceId,
     total_verifications: total,
     distinct_reporters: total,
-    avg_completeness: avgCompleteness,
-    avg_accuracy: avgAccuracy,
-    pass_rate: passRate,
-    format_compliance_rate: formatRate,
-    sla_compliance_rate: slaRate,
+    scored_verifications: data.filter((r) => typeof r.accuracy_score === "number").length,
+    avg_completeness: averageOf(data, "completeness_score"),
+    avg_accuracy: averageOf(data, "accuracy_score"),
+    pass_rate: passRate(data),
+    code_checked_verifications: codeChecked.length,
+    code_checked_pass_rate: codeChecked.length ? passRate(codeChecked) : null,
+    format_compliance_rate: checkedRate(data, "format_compliance"),
+    sla_compliance_rate: checkedRate(data, "sla_met"),
     recent_trend: trend,
     last_verified_at: data[0].created_at,
     attestation: "unattested",

@@ -42,27 +42,30 @@ test("a response that is not the JSON asked for fails, and the judge is not aske
   assert.equal(r.verdict, "fail");
   assert.equal(r.decided_by, "code");
   assert.equal(r.format_compliance, false);
-  assert.equal(r.completeness_score, 0);
+  assert.equal(r.completeness_score, null, "the judge did not score it");
   assert.equal(r.accuracy_score, null);
   assert.equal(sent.length, 0, "the judge was asked");
   assert.equal(inserted[0].overall_pass, false, "and the stored row says so");
 });
 
-test("a format failure fails even when every required field is filled", async () => {
+test("a format failure fails even when every required field is present", async () => {
   const { judge, sent } = fakeJudge(passingJudge);
   const r = await verifyOutcome({ request_description: "product", response_data: JSON.stringify({ name: 5, price: 9 }), expected_schema: schema }, "WalletA", { judge, sb: fakeSupabase().sb });
-  assert.equal(r.completeness_score, 100, "both fields are present and filled");
+  assert.ok(r.checks.by_code.includes("required fields: 2 of 2 present"));
   assert.equal(r.format_compliance, false);
   assert.equal(r.overall_pass, false);
+  assert.equal(r.completeness_score, null);
   assert.equal(sent.length, 0);
 });
 
-test("a response missing required fields fails with completeness capped", async () => {
-  const { judge } = fakeJudge(passingJudge);
+test("a response missing required fields fails, and code names the missing ones", async () => {
+  const { judge, sent } = fakeJudge(passingJudge);
   const r = await verifyOutcome({ request_description: "product", response_data: JSON.stringify({ name: "Widget" }), expected_schema: schema }, "WalletA", { judge, sb: fakeSupabase().sb });
   assert.equal(r.overall_pass, false);
-  assert.equal(r.completeness_score, 50);
+  assert.equal(r.decided_by, "code");
   assert.ok(r.issues.includes("$.price: missing"));
+  assert.ok(r.checks.by_code.includes("required fields: 1 of 2 present"));
+  assert.equal(sent.length, 0);
 });
 
 test("a well-formed, complete response passes when the judge agrees", async () => {
@@ -75,6 +78,14 @@ test("a well-formed, complete response passes when the judge agrees", async () =
   assert.equal(r.checks.judge, "advisory");
 });
 
+test("the judge's scores decide what code passed: low scores fail", async () => {
+  const { judge } = fakeJudge(JSON.stringify({ completeness_score: 40, accuracy_score: 95, issues: ["half the products"], summary: "Partial." }));
+  const r = await verifyOutcome({ request_description: "product", response_data: JSON.stringify({ name: "Widget", price: 9 }), expected_schema: schema }, "WalletA", { judge, sb: fakeSupabase().sb });
+  assert.equal(r.verdict, "fail");
+  assert.equal(r.decided_by, "code+judge");
+  assert.equal(r.completeness_score, 40);
+});
+
 test("an unreadable judge reply is inconclusive, never a pass, and is still stored", async () => {
   for (const reply of ["Sure! It passes.", JSON.stringify({ completeness_score: 150, accuracy_score: 100 }), JSON.stringify({ accuracy_score: 90 })]) {
     const { judge } = fakeJudge(reply);
@@ -82,19 +93,26 @@ test("an unreadable judge reply is inconclusive, never a pass, and is still stor
     const r = await verifyOutcome({ request_description: "x", response_data: "y" }, "WalletA", { judge, sb });
     assert.equal(r.verdict, "inconclusive", reply);
     assert.equal(r.overall_pass, false);
+    assert.equal(r.completeness_score, null);
     assert.equal(r.accuracy_score, null);
     assert.equal(inserted.length, 1, "a judged service cannot keep its failure out of the record");
   }
 });
 
-test("a judge that errors leaves an inconclusive verdict that is still stored", async () => {
-  const { judge } = fakeJudge("", new Error("Grok API error 503: overloaded"));
+test("a judge that errors leaves an inconclusive verdict that is stored, and its error text stays in the server log", async (t) => {
+  const logged: string[] = [];
+  t.mock.method(console, "error", (...args: unknown[]) => logged.push(args.join(" ")));
+  const { judge } = fakeJudge("", new Error('Grok API error 401: {"error":"Incorrect API key provided: xai-****Zt9Q"}'));
   const { sb, inserted } = fakeSupabase();
   const r = await verifyOutcome({ request_description: "x", response_data: "y" }, "WalletA", { judge, sb });
   assert.equal(r.verdict, "inconclusive");
   assert.match(r.summary, /could not be reached/);
   assert.equal(inserted.length, 1);
   assert.equal(inserted[0].overall_pass, false);
+  for (const text of [JSON.stringify(r), JSON.stringify(inserted[0])]) {
+    assert.ok(!text.includes("xai-") && !text.includes("401"), "the judge API's error text reached the caller or the record");
+  }
+  assert.ok(logged.some((line) => line.includes("Grok API error 401")), "the error text is in the server log");
 });
 
 test("a reply wrapped in a code fence is read, and a long reply parses in linear time", () => {
@@ -149,6 +167,18 @@ test("the judge sees no control characters and at most 20,000 characters of the 
   assert.ok(fields.response_data.startsWith("abc"));
   assert.ok(fields.response_data.length <= 20_000 + " [truncated]".length);
   assert.ok(r.checks.not_checked.some((n) => n.includes("first 20000 characters")));
+  const { judge: whole, sent: wholeSent } = fakeJudge(passingJudge);
+  const fits = await verifyOutcome({ request_description: "req", response_data: "\u0000".repeat(5) + "x".repeat(20_000) }, "WalletA", { judge: whole, sb: fakeSupabase().sb });
+  assert.equal(JSON.parse(wholeSent[0][1].content).response_data, "x".repeat(20_000), "stripped characters do not count toward the limit");
+  assert.ok(!fits.checks.not_checked.some((n) => n.includes("first 20000 characters")));
+});
+
+test("lone surrogates do not swell the judge's message", async () => {
+  const { judge, sent } = fakeJudge(passingJudge);
+  await verifyOutcome({ request_description: "req", response_data: "\ud800".repeat(30_000) }, "WalletA", { judge, sb: fakeSupabase().sb });
+  const message = sent[0][1].content;
+  assert.ok(message.length < 21_000, `the judge's message is ${message.length} characters`);
+  assert.ok(!/\\ud800/i.test(message));
 });
 
 test("the stored row names the paying wallet, keeps the database's ranges, and holds no NUL", async () => {

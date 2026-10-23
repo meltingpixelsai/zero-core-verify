@@ -127,7 +127,7 @@ const createPaidHandler = () => createMcpPaidHandler(
       {
         request_description: z.string().max(8_000).describe("What was requested from the service"),
         response_data: z.string().max(100_000).describe("The actual response/output received from the service"),
-        expected_schema: z.string().max(20_000).optional().describe("A JSON Schema, or two or more required field names separated by commas (e.g. 'name, price, url'). Anything else is passed to the AI judge only."),
+        expected_schema: z.string().max(20_000).optional().describe("A JSON Schema, or two or more required top-level field names (letters, digits, _ and -) separated by commas, e.g. 'name, price, url'. Anything else is passed to the AI judge only."),
         sla_requirements: z.string().max(2_000).optional().describe("SLA wording for the AI judge (e.g. 'must include all fields'). For a time limit code can check, use the two fields below."),
         service_id: z.string().max(200).optional().describe("Service identifier for quality tracking (e.g. 'harvey-tools/scrape_url')"),
         observed_response_time_ms: z.number().int().min(0).max(3_600_000).optional().describe("The response time you measured, in milliseconds"),
@@ -160,7 +160,7 @@ const createPaidHandler = () => createMcpPaidHandler(
 
     paidTool(
       "get_service_quality",
-      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns average completeness, accuracy, pass rate, format compliance rate, SLA compliance rate, and quality trend. The scores are self-reported by paying wallets and not attested: nothing proves a reporter used the service.",
+      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns the pass rate (overall, and over the rows where code checked the format or a measured time), average completeness and accuracy over the scored rows with their count, format and SLA compliance rates, and a trend by pass rate. The scores are self-reported by paying wallets and not attested: nothing proves a reporter used the service.",
       "$0.005",
       {
         service_id: z.string().max(200).describe("Service identifier to query (e.g. 'harvey-tools/scrape_url')"),

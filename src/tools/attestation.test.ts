@@ -33,6 +33,9 @@ const row = (wallet: string, format: boolean | null, sla: boolean | null) => ({
   created_at: "2026-10-23T10:00:00Z",
 });
 
+/** A row code failed before the judge scored it. */
+const codeFailed = (wallet: string) => ({ ...row(wallet, false, null), completeness_score: null, accuracy_score: null, overall_pass: false });
+
 test("every quality result says the scores are self-reported and unattested", async () => {
   const empty = await getServiceQuality("svc", fakeSupabase([]).sb);
   assert.equal(empty.attestation, "unattested");
@@ -51,14 +54,41 @@ test("the format and SLA rates count only rows where code checked them", async (
   assert.equal(none.sla_compliance_rate, null);
 });
 
-test("averages skip rows without a score, so a code-failed or inconclusive row does not count as zero", async () => {
-  const unscored = { ...row("B", false, null), completeness_score: null, accuracy_score: null, overall_pass: false };
-  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), unscored]).sb);
+test("averages skip rows without a score and say how many rows they cover", async () => {
+  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), codeFailed("B")]).sb);
   assert.equal(q.avg_accuracy, 90);
   assert.equal(q.avg_completeness, 90);
-  assert.equal(q.pass_rate, 50, "but it still counts as not passed");
-  const none = await getServiceQuality("svc", fakeSupabase([unscored]).sb);
+  assert.equal(q.scored_verifications, 1);
+  assert.equal(q.pass_rate, 50, "the unscored row still counts as not passed");
+  // The review's case: five code failures and one judged 90 read as 90 on one scored row, against a 17% pass rate.
+  const mostlyFailed = await getServiceQuality("svc", fakeSupabase([row("A", true, null), ...["B", "C", "D", "E", "F"].map(codeFailed)]).sb);
+  assert.equal(mostlyFailed.avg_accuracy, 90);
+  assert.equal(mostlyFailed.scored_verifications, 1);
+  assert.equal(mostlyFailed.pass_rate, 17);
+  const none = await getServiceQuality("svc", fakeSupabase([codeFailed("B")]).sb);
   assert.equal(none.avg_accuracy, null);
+  assert.equal(none.scored_verifications, 0);
+});
+
+test("the code-checked pass rate counts only rows where code checked the format or a measured time", async () => {
+  const judgeOnly = { ...row("C", null, null), overall_pass: true };
+  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), codeFailed("B"), judgeOnly, row("D", null, true)]).sb);
+  assert.equal(q.code_checked_verifications, 3);
+  assert.equal(q.code_checked_pass_rate, 67);
+  assert.equal(q.pass_rate, 75);
+  const none = await getServiceQuality("svc", fakeSupabase([judgeOnly]).sb);
+  assert.equal(none.code_checked_verifications, 0);
+  assert.equal(none.code_checked_pass_rate, null);
+});
+
+test("the trend compares pass rates over every row, so failures code caught count", async () => {
+  const passes = (prefix: string) => Array.from({ length: 6 }, (_, i) => row(`${prefix}${i}`, true, null));
+  const fails = (prefix: string) => Array.from({ length: 6 }, (_, i) => codeFailed(`${prefix}${i}`));
+  // Rows come newest first.
+  assert.equal((await getServiceQuality("svc", fakeSupabase([...fails("new"), ...passes("old")]).sb)).recent_trend, "declining");
+  assert.equal((await getServiceQuality("svc", fakeSupabase([...passes("new"), ...fails("old")]).sb)).recent_trend, "improving");
+  assert.equal((await getServiceQuality("svc", fakeSupabase([...passes("new"), ...passes("old")]).sb)).recent_trend, "stable");
+  assert.equal((await getServiceQuality("svc", fakeSupabase(passes("only").slice(0, 5)).sb)).recent_trend, "insufficient_data");
 });
 
 test("a report claims nothing about format or response time", async () => {

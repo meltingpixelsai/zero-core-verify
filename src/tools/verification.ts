@@ -20,7 +20,7 @@ interface VerificationResult {
   /** "code": code's checks failed it and the judge was not asked; "code+judge": code checked something and the
    * judge scored the rest; "judge": nothing code could check was given, so only the advisory judge decided. */
   decided_by: "code" | "code+judge" | "judge";
-  /** null when not scored (code failed the response first, or the judge gave no usable reply). */
+  /** The judge's scores; null when it did not score (code failed the response first, or it gave no usable reply). */
   completeness_score: number | null;
   accuracy_score: number | null;
   /** null: no machine-checkable schema was given, or code could not check all of it. */
@@ -74,19 +74,19 @@ export function parseJudgeReply(content: string): { completeness: number; accura
   return { completeness, accuracy, issues, summary };
 }
 
-/** A field as the judge sees it: no control characters, and at most `max` characters. */
-function forJudge(text: string | undefined, max: number): string | null {
-  if (text === undefined) return null;
-  const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
-  return clean.length > max ? clean.slice(0, max) + " [truncated]" : clean;
+/** A field as the judge sees it: no control characters or lone surrogates, at most `max` characters, and whether it was cut. */
+function forJudge(text: string, max: number): { text: string; cut: boolean } {
+  // Two past the limit, so a cut still shows when a surrogate pair straddles it.
+  const clean = safeText(text, max + 2);
+  return clean.length > max ? { text: safeText(clean, max) + " [truncated]", cut: true } : { text: clean, cut: false };
 }
 
 /**
  * Verify a service outcome. Code decides what it can (src/lib/output-checks.ts): format against the caller's
- * schema or field list, a ceiling on completeness from the required fields, and a measured time against a stated
- * limit. A response that fails code's checks fails, and the judge is not asked. Otherwise the AI judge scores
- * accuracy and completeness as advice, and a pass needs both at 70 or more. Every verification is stored, naming
- * the paying wallet, so a judged service cannot keep a failure out of the record.
+ * schema or field list, whether the required fields are present, and a measured time against a stated limit. A
+ * response that fails code's checks fails, and the judge is not asked. Otherwise the AI judge scores accuracy and
+ * completeness as advice, and a pass needs both at 70 or more. Every verification is stored, naming the paying
+ * wallet, so a judged service cannot keep a failure out of the record.
  */
 export async function verifyOutcome(
   input: VerificationInput,
@@ -95,8 +95,8 @@ export async function verifyOutcome(
 ): Promise<VerificationResult> {
   const verificationId = `ver_${randomUUID().slice(0, 12)}`;
   const checks = runOutputChecks(input);
-  const codeFailed = checks.format_compliance === false || checks.sla_met === false || (checks.completeness_cap !== null && checks.completeness_cap < 70);
-  const codeChecked = checks.format_compliance !== null || checks.sla_met !== null || checks.completeness_cap !== null;
+  const codeFailed = checks.format_compliance === false || checks.sla_met === false;
+  const codeChecked = checks.format_compliance !== null || checks.sla_met !== null || checks.required_present !== null;
 
   let result: VerificationResult;
   if (codeFailed) {
@@ -104,7 +104,7 @@ export async function verifyOutcome(
       verification_id: verificationId,
       verdict: "fail",
       decided_by: "code",
-      completeness_score: checks.completeness_cap,
+      completeness_score: null,
       accuracy_score: null,
       format_compliance: checks.format_compliance,
       sla_met: checks.sla_met,
@@ -115,40 +115,42 @@ export async function verifyOutcome(
     };
   } else {
     let reply: ReturnType<typeof parseJudgeReply> = null;
-    let judgeError: string | null = null;
+    let judgeFailed = false;
     const notChecked = [...checks.not_checked];
-    if (input.response_data.length > JUDGE_LIMITS.response_data) notChecked.push(`judge: saw the first ${JUDGE_LIMITS.response_data} characters of the response`);
+    const response = forJudge(input.response_data, JUDGE_LIMITS.response_data);
+    if (response.cut) notChecked.push(`judge: saw the first ${JUDGE_LIMITS.response_data} characters of the response`);
+    const optional = (text: string | undefined, max: number) => (text === undefined ? null : forJudge(text, max).text);
     try {
       const judge = deps.judge ?? callGrok;
-      const response = await judge(
+      const judged = await judge(
         [
           { role: "system", content: JUDGE_PROMPT },
           {
             role: "user",
             content: JSON.stringify({
-              request_description: forJudge(input.request_description, JUDGE_LIMITS.request_description),
-              response_data: forJudge(input.response_data, JUDGE_LIMITS.response_data),
-              expected_schema: forJudge(input.expected_schema, JUDGE_LIMITS.expected_schema),
-              sla_requirements: forJudge(input.sla_requirements, JUDGE_LIMITS.sla_requirements),
+              request_description: forJudge(input.request_description, JUDGE_LIMITS.request_description).text,
+              response_data: response.text,
+              expected_schema: optional(input.expected_schema, JUDGE_LIMITS.expected_schema),
+              sla_requirements: optional(input.sla_requirements, JUDGE_LIMITS.sla_requirements),
             }),
           },
         ],
         { temperature: 0.1, maxTokens: 2048 }
       );
-      reply = parseJudgeReply(response.content);
+      reply = parseJudgeReply(judged.content);
     } catch (err) {
-      judgeError = safeText(err instanceof Error ? err.message : String(err), 200);
+      // The error can carry the judge API's reply (a masked key, account details): it goes to the server log only.
+      console.error("Judge call failed:", safeText(err instanceof Error ? err.message : String(err), 300));
+      judgeFailed = true;
     }
-    const completeness = reply ? (checks.completeness_cap === null ? reply.completeness : Math.min(reply.completeness, checks.completeness_cap)) : checks.completeness_cap;
-    const accuracy = reply ? reply.accuracy : null;
-    const overall_pass = reply !== null && completeness !== null && accuracy !== null && completeness >= 70 && accuracy >= 70;
-    const why = judgeError ? `The judge could not be reached (${judgeError}), so the verdict is inconclusive` : "The judge's reply could not be read, so the verdict is inconclusive";
+    const overall_pass = reply !== null && reply.completeness >= 70 && reply.accuracy >= 70;
+    const why = judgeFailed ? "The judge could not be reached, so the verdict is inconclusive" : "The judge's reply could not be read, so the verdict is inconclusive";
     result = {
       verification_id: verificationId,
       verdict: reply === null ? "inconclusive" : overall_pass ? "pass" : "fail",
       decided_by: codeChecked ? "code+judge" : "judge",
-      completeness_score: completeness,
-      accuracy_score: accuracy,
+      completeness_score: reply ? reply.completeness : null,
+      accuracy_score: reply ? reply.accuracy : null,
       format_compliance: checks.format_compliance,
       sla_met: checks.sla_met,
       overall_pass,
