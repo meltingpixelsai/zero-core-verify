@@ -9,7 +9,7 @@ import { landingHtml, devHtml } from "./landing.js";
 import { verifyOutcome } from "./tools/verification.js";
 import { getServiceQuality } from "./tools/quality.js";
 import { reportOutcome } from "./tools/reporting.js";
-import { createSettleFirstPaidTools, type SettleFirstConfig } from "./lib/x402-settle-first.js";
+import { createSettleFirstPaidTools, type SettleFirstConfig, type X402Settlement } from "./lib/x402-settle-first.js";
 
 // ── Shared tool callback helpers ─────────────────────────────
 
@@ -23,6 +23,14 @@ function toolError(err: unknown) {
     isError: true as const,
   };
 }
+
+/** The wallet whose payment settled for this call; quality scores count each wallet once. */
+function payingWallet(extra: unknown): string | null {
+  const payer = (extra as { x402Settlement?: X402Settlement } | undefined)?.x402Settlement?.payer;
+  return typeof payer === "string" && payer.length > 0 ? payer : null;
+}
+
+const NO_PAYER = "The payment settled without naming the paying wallet, so the report cannot be attributed";
 
 // ── Free tool data ───────────────────────────────────────────
 
@@ -122,9 +130,11 @@ const paidHandler = createMcpPaidHandler(
         expected_schema?: string;
         sla_requirements?: string;
         service_id?: string;
-      }) => {
+      }, extra: unknown) => {
+        const reporter = payingWallet(extra);
+        if (!reporter) return toolError(NO_PAYER);
         try {
-          return toolResult(await verifyOutcome({ request_description, response_data, expected_schema, sla_requirements, service_id }));
+          return toolResult(await verifyOutcome({ request_description, response_data, expected_schema, sla_requirements, service_id }, reporter));
         } catch (err) {
           return toolError(err);
         }
@@ -133,7 +143,7 @@ const paidHandler = createMcpPaidHandler(
 
     paidTool(
       "get_service_quality",
-      "Get aggregated quality scores for a service based on all past verifications. Returns average completeness, accuracy, pass rate, format compliance rate, SLA compliance rate, and quality trend.",
+      "Get aggregated quality scores for a service based on past verifications and reports, counting each paying wallet once (its latest). Returns average completeness, accuracy, pass rate, format compliance rate, SLA compliance rate, and quality trend.",
       "$0.005",
       {
         service_id: z.string().describe("Service identifier to query (e.g. 'harvey-tools/scrape_url')"),
@@ -164,9 +174,11 @@ const paidHandler = createMcpPaidHandler(
         was_successful: boolean;
         response_time_ms?: number;
         notes?: string;
-      }) => {
+      }, extra: unknown) => {
+        const reporter = payingWallet(extra);
+        if (!reporter) return toolError(NO_PAYER);
         try {
-          return toolResult(await reportOutcome({ service_id, was_successful, response_time_ms, notes }));
+          return toolResult(await reportOutcome({ service_id, was_successful, response_time_ms, notes }, reporter));
         } catch (err) {
           return toolError(err);
         }

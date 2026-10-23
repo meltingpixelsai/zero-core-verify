@@ -1,8 +1,11 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getSupabase } from "../lib/supabase-client.js";
 
 interface ServiceQuality {
   service_id: string;
   total_verifications: number;
+  /** Each paying wallet counts once: its latest report or verification. */
+  distinct_reporters: number;
   avg_completeness: number;
   avg_accuracy: number;
   pass_rate: number;
@@ -12,23 +15,37 @@ interface ServiceQuality {
   last_verified_at: string | null;
 }
 
-/** Get aggregated quality scores for a service */
-export async function getServiceQuality(serviceId: string): Promise<ServiceQuality> {
-  const sb = getSupabase();
-
-  const { data, error } = await sb
-    .from("verification_results")
-    .select("completeness_score, accuracy_score, format_compliance, sla_met, overall_pass, created_at")
+/**
+ * Get aggregated quality scores for a service. Each paying wallet counts once
+ * (its latest report or verification, newest 100 wallets), so one payer cannot
+ * outvote everyone else by reporting many times. The view
+ * verification_latest_by_reporter keeps one row per (service_id,
+ * reporter_wallet) in the database (DISTINCT ON), so no number of rows from one
+ * wallet can push the others out of the query.
+ */
+export async function getServiceQuality(serviceId: string, sb: SupabaseClient = getSupabase()): Promise<ServiceQuality> {
+  const { data: rows, error } = await sb
+    .from("verification_latest_by_reporter")
+    .select("completeness_score, accuracy_score, format_compliance, sla_met, overall_pass, created_at, reporter_wallet")
     .eq("service_id", serviceId)
+    .not("reporter_wallet", "is", null)
     .order("created_at", { ascending: false })
     .limit(100);
 
   if (error) throw new Error(`Quality query failed: ${error.message}`);
 
+  const seen = new Set<string>();
+  const data = (rows ?? []).filter((row) => {
+    if (seen.has(row.reporter_wallet)) return false;
+    seen.add(row.reporter_wallet);
+    return true;
+  }).slice(0, 100);
+
   if (!data || data.length === 0) {
     return {
       service_id: serviceId,
       total_verifications: 0,
+      distinct_reporters: 0,
       avg_completeness: 0,
       avg_accuracy: 0,
       pass_rate: 0,
@@ -63,6 +80,7 @@ export async function getServiceQuality(serviceId: string): Promise<ServiceQuali
   return {
     service_id: serviceId,
     total_verifications: total,
+    distinct_reporters: total,
     avg_completeness: avgCompleteness,
     avg_accuracy: avgAccuracy,
     pass_rate: passRate,

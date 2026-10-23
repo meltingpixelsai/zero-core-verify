@@ -45,7 +45,7 @@ const LLMS_TXT = `# Harvey Verify - Agent Outcome Verification MCP Server
 - [list_tools](https://verify.rugslayer.com/mcp): List all tools with pricing (FREE)
 - [health](https://verify.rugslayer.com/mcp): Server status and payment config (FREE)
 - [verify_outcome](https://verify.rugslayer.com/mcp): LLM-as-judge verification of service outcomes ($0.01)
-- [get_service_quality](https://verify.rugslayer.com/mcp): Aggregated quality scores for a service ($0.005)
+- [get_service_quality](https://verify.rugslayer.com/mcp): Aggregated quality scores for a service, one vote per paying wallet ($0.005)
 - [report_outcome](https://verify.rugslayer.com/mcp): Simple pass/fail outcome report ($0.002)
 
 ## Connection
@@ -181,7 +181,7 @@ const MCP_CARD = {
     },
     {
       name: "get_service_quality",
-      description: "Aggregated quality scores for a service based on all verifications.",
+      description: "Aggregated quality scores for a service counting each paying wallet once (its latest report).",
       price: "$0.005 USDC",
       input_schema: {
         type: "object",
