@@ -4,14 +4,14 @@ module.exports = {
       name: "harvey-verify",
       script: "dist/index.js",
       cwd: "/home/deploy/projects/harvey-verify",
-      // V8 heap cap well under max_memory_restart (256M): under a burst of requests V8 otherwise lets the
+      // V8 heap cap well under max_memory_restart (384M): under a burst of requests V8 otherwise lets the
       // heap grow past the limit before it collects, and the process manager restarts the server (and drains).
-      node_args: "--enable-source-maps --max-old-space-size=160",
+      node_args: "--enable-source-maps --max-old-space-size=224",
       env: {
         NODE_ENV: "production",
         PORT: 8404,
       },
-      max_memory_restart: "256M",
+      max_memory_restart: "384M",
       // Longer than the 90 s shutdown grace (src/lib/graceful-shutdown.ts), so a stop
       // or restart lets paid calls in flight finish instead of killing them at 1.6 s.
       kill_timeout: 100000,
