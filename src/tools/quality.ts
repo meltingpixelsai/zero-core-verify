@@ -17,17 +17,20 @@ interface ServiceQuality {
 
 /**
  * Get aggregated quality scores for a service. Each paying wallet counts once
- * (its latest report or verification, up to 100 wallets), so one payer cannot
- * outvote everyone else by reporting many times.
+ * (its latest report or verification, newest 100 wallets), so one payer cannot
+ * outvote everyone else by reporting many times. The view
+ * verification_latest_by_reporter keeps one row per (service_id,
+ * reporter_wallet) in the database (DISTINCT ON), so no number of rows from one
+ * wallet can push the others out of the query.
  */
 export async function getServiceQuality(serviceId: string, sb: SupabaseClient = getSupabase()): Promise<ServiceQuality> {
   const { data: rows, error } = await sb
-    .from("verification_results")
+    .from("verification_latest_by_reporter")
     .select("completeness_score, accuracy_score, format_compliance, sla_met, overall_pass, created_at, reporter_wallet")
     .eq("service_id", serviceId)
     .not("reporter_wallet", "is", null)
     .order("created_at", { ascending: false })
-    .limit(1000);
+    .limit(100);
 
   if (error) throw new Error(`Quality query failed: ${error.message}`);
 

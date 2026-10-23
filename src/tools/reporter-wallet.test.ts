@@ -8,6 +8,7 @@ interface Call {
   table: string;
   filters: Array<[string, ...unknown[]]>;
   inserted?: Record<string, unknown>;
+  limit?: number;
 }
 
 /** A query-builder stand-in that records filters and inserts and returns preset rows. */
@@ -28,7 +29,10 @@ function fakeSupabase(rows: Record<string, unknown>[] = []) {
           return builder;
         },
         order: () => builder,
-        limit: () => builder,
+        limit: (n: number) => {
+          call.limit = n;
+          return builder;
+        },
         insert: (payload: Record<string, unknown>) => {
           call.inserted = payload;
           return Promise.resolve({ error: null });
@@ -74,7 +78,14 @@ test("quality counts each paying wallet once, using its latest row", async () =>
   assert.equal(q.total_verifications, 3);
   assert.equal(q.pass_rate, 67);
   assert.equal(q.last_verified_at, "2026-10-22T03:00:00Z");
-  assert.ok(calls[0].filters.some((f) => f[0] === "not" && f[1] === "reporter_wallet"), "unattributed rows excluded");
+  assert.ok(
+    calls[0].filters.some((f) => f[0] === "not" && f[1] === "reporter_wallet" && f[2] === "is" && f[3] === null),
+    "unattributed rows excluded",
+  );
+  // The database keeps one row per (service_id, reporter_wallet), so 1000 rows from one
+  // wallet cannot push the others out of a raw-row window.
+  assert.equal(calls[0].table, "verification_latest_by_reporter");
+  assert.equal(calls[0].limit, 100);
 });
 
 test("one wallet reporting many times cannot outvote the others", async () => {

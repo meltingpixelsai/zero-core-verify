@@ -181,7 +181,7 @@ const MCP_CARD = {
     },
     {
       name: "get_service_quality",
-      description: "Aggregated quality scores for a service based on all verifications.",
+      description: "Aggregated quality scores for a service counting each paying wallet once (its latest report).",
       price: "$0.005 USDC",
       input_schema: {
         type: "object",
