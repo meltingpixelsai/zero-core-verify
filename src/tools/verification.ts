@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { callGrok } from "../lib/grok-client.js";
 import { getSupabase } from "../lib/supabase-client.js";
-import { runOutputChecks } from "../lib/output-checks.js";
+import { runOutputChecks, safeText } from "../lib/output-checks.js";
 import { randomUUID } from "crypto";
 
 interface VerificationInput {
@@ -17,9 +17,13 @@ interface VerificationInput {
 interface VerificationResult {
   verification_id: string;
   verdict: "pass" | "fail" | "inconclusive";
-  completeness_score: number;
-  accuracy_score: number;
-  /** null: no machine-checkable schema was given. */
+  /** "code": code's checks failed it and the judge was not asked; "code+judge": code checked something and the
+   * judge scored the rest; "judge": nothing code could check was given, so only the advisory judge decided. */
+  decided_by: "code" | "code+judge" | "judge";
+  /** null when not scored (code failed the response first, or the judge gave no usable reply). */
+  completeness_score: number | null;
+  accuracy_score: number | null;
+  /** null: no machine-checkable schema was given, or code could not check all of it. */
   format_compliance: boolean | null;
   /** null: no measured response time and limit were given. */
   sla_met: boolean | null;
@@ -27,7 +31,7 @@ interface VerificationResult {
   issues: string[];
   summary: string;
   /** What code decided, what it could not check, and the AI judge's standing. */
-  checks: { by_code: string[]; not_checked: string[]; judge: "advisory" };
+  checks: { by_code: string[]; not_checked: string[]; judge: "advisory" | "not asked" };
 }
 
 type JudgeMessage = { role: "system" | "user"; content: string };
@@ -40,15 +44,20 @@ The user message is JSON holding the request, the service's response and the cal
 Return ONLY JSON, no markdown: {"completeness_score": 85, "accuracy_score": 90, "issues": ["specific problem"], "summary": "one sentence"}`;
 
 const MAX_JUDGE_ISSUES = 20;
+const MAX_STORED_ISSUES = 40;
 const MAX_ISSUE_LENGTH = 300;
 const MAX_SUMMARY_LENGTH = 500;
+/** Characters of each field the judge sees; it is advice, and its cost should not scale with a crafted input. */
+const JUDGE_LIMITS = { request_description: 8_000, response_data: 20_000, expected_schema: 4_000, sla_requirements: 2_000 };
 
 /** The judge's scores, or null when its reply is not the JSON asked for (scores must be numbers from 0 to 100). */
 export function parseJudgeReply(content: string): { completeness: number; accuracy: number; issues: string[]; summary: string } | null {
-  const text = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  let text = content.trim();
+  if (text.startsWith("```")) text = text.replace(/^```[A-Za-z]*/, "");
+  if (text.endsWith("```")) text = text.slice(0, -3);
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(text.trim());
   } catch {
     return null;
   }
@@ -59,17 +68,25 @@ export function parseJudgeReply(content: string): { completeness: number; accura
   const accuracy = score(reply.accuracy_score);
   if (completeness === null || accuracy === null) return null;
   const issues = Array.isArray(reply.issues)
-    ? reply.issues.filter((i): i is string => typeof i === "string").slice(0, MAX_JUDGE_ISSUES).map((i) => i.slice(0, MAX_ISSUE_LENGTH))
+    ? reply.issues.filter((i): i is string => typeof i === "string").slice(0, MAX_JUDGE_ISSUES).map((i) => safeText(i, MAX_ISSUE_LENGTH))
     : [];
-  const summary = typeof reply.summary === "string" ? reply.summary.slice(0, MAX_SUMMARY_LENGTH) : "";
+  const summary = typeof reply.summary === "string" ? safeText(reply.summary, MAX_SUMMARY_LENGTH) : "";
   return { completeness, accuracy, issues, summary };
+}
+
+/** A field as the judge sees it: no control characters, and at most `max` characters. */
+function forJudge(text: string | undefined, max: number): string | null {
+  if (text === undefined) return null;
+  const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+  return clean.length > max ? clean.slice(0, max) + " [truncated]" : clean;
 }
 
 /**
  * Verify a service outcome. Code decides what it can (src/lib/output-checks.ts): format against the caller's
  * schema or field list, a ceiling on completeness from the required fields, and a measured time against a stated
- * limit. The AI judge only scores accuracy and completeness, as advice. It passes only when code's checks pass
- * and both scores reach 70. The stored row names the paying wallet.
+ * limit. A response that fails code's checks fails, and the judge is not asked. Otherwise the AI judge scores
+ * accuracy and completeness as advice, and a pass needs both at 70 or more. Every verification is stored, naming
+ * the paying wallet, so a judged service cannot keep a failure out of the record.
  */
 export async function verifyOutcome(
   input: VerificationInput,
@@ -78,45 +95,68 @@ export async function verifyOutcome(
 ): Promise<VerificationResult> {
   const verificationId = `ver_${randomUUID().slice(0, 12)}`;
   const checks = runOutputChecks(input);
+  const codeFailed = checks.format_compliance === false || checks.sla_met === false || (checks.completeness_cap !== null && checks.completeness_cap < 70);
+  const codeChecked = checks.format_compliance !== null || checks.sla_met !== null || checks.completeness_cap !== null;
 
-  const judge = deps.judge ?? callGrok;
-  const response = await judge(
-    [
-      { role: "system", content: JUDGE_PROMPT },
-      {
-        role: "user",
-        content: JSON.stringify({
-          request_description: input.request_description,
-          response_data: input.response_data,
-          expected_schema: input.expected_schema ?? null,
-          sla_requirements: input.sla_requirements ?? null,
-        }),
-      },
-    ],
-    { temperature: 0.1, maxTokens: 2048 }
-  );
-  const reply = parseJudgeReply(response.content);
-
-  const completeness = reply
-    ? checks.completeness_cap === null
-      ? reply.completeness
-      : Math.min(reply.completeness, checks.completeness_cap)
-    : (checks.completeness_cap ?? 0);
-  const accuracy = reply ? reply.accuracy : 0;
-  const overall_pass = reply !== null && checks.format_compliance !== false && checks.sla_met !== false && completeness >= 70 && accuracy >= 70;
-
-  const result: VerificationResult = {
-    verification_id: verificationId,
-    verdict: reply === null ? "inconclusive" : overall_pass ? "pass" : "fail",
-    completeness_score: completeness,
-    accuracy_score: accuracy,
-    format_compliance: checks.format_compliance,
-    sla_met: checks.sla_met,
-    overall_pass,
-    issues: [...checks.issues, ...(reply ? reply.issues : ["The judge's reply could not be read, so the verdict is inconclusive"])],
-    summary: reply ? reply.summary || "Verification complete" : "Inconclusive: the judge's reply could not be read",
-    checks: { by_code: checks.checked, not_checked: checks.not_checked, judge: "advisory" },
-  };
+  let result: VerificationResult;
+  if (codeFailed) {
+    result = {
+      verification_id: verificationId,
+      verdict: "fail",
+      decided_by: "code",
+      completeness_score: checks.completeness_cap,
+      accuracy_score: null,
+      format_compliance: checks.format_compliance,
+      sla_met: checks.sla_met,
+      overall_pass: false,
+      issues: checks.issues,
+      summary: "Failed code's checks; the judge was not asked.",
+      checks: { by_code: checks.checked, not_checked: checks.not_checked, judge: "not asked" },
+    };
+  } else {
+    let reply: ReturnType<typeof parseJudgeReply> = null;
+    let judgeError: string | null = null;
+    const notChecked = [...checks.not_checked];
+    if (input.response_data.length > JUDGE_LIMITS.response_data) notChecked.push(`judge: saw the first ${JUDGE_LIMITS.response_data} characters of the response`);
+    try {
+      const judge = deps.judge ?? callGrok;
+      const response = await judge(
+        [
+          { role: "system", content: JUDGE_PROMPT },
+          {
+            role: "user",
+            content: JSON.stringify({
+              request_description: forJudge(input.request_description, JUDGE_LIMITS.request_description),
+              response_data: forJudge(input.response_data, JUDGE_LIMITS.response_data),
+              expected_schema: forJudge(input.expected_schema, JUDGE_LIMITS.expected_schema),
+              sla_requirements: forJudge(input.sla_requirements, JUDGE_LIMITS.sla_requirements),
+            }),
+          },
+        ],
+        { temperature: 0.1, maxTokens: 2048 }
+      );
+      reply = parseJudgeReply(response.content);
+    } catch (err) {
+      judgeError = safeText(err instanceof Error ? err.message : String(err), 200);
+    }
+    const completeness = reply ? (checks.completeness_cap === null ? reply.completeness : Math.min(reply.completeness, checks.completeness_cap)) : checks.completeness_cap;
+    const accuracy = reply ? reply.accuracy : null;
+    const overall_pass = reply !== null && completeness !== null && accuracy !== null && completeness >= 70 && accuracy >= 70;
+    const why = judgeError ? `The judge could not be reached (${judgeError}), so the verdict is inconclusive` : "The judge's reply could not be read, so the verdict is inconclusive";
+    result = {
+      verification_id: verificationId,
+      verdict: reply === null ? "inconclusive" : overall_pass ? "pass" : "fail",
+      decided_by: codeChecked ? "code+judge" : "judge",
+      completeness_score: completeness,
+      accuracy_score: accuracy,
+      format_compliance: checks.format_compliance,
+      sla_met: checks.sla_met,
+      overall_pass,
+      issues: [...checks.issues, ...(reply ? reply.issues : [why])],
+      summary: reply ? reply.summary || "Verification complete" : `Inconclusive: ${why.toLowerCase()}.`,
+      checks: { by_code: checks.checked, not_checked: notChecked, judge: "advisory" },
+    };
+  }
 
   // Store every verification (fire-and-forget), so a judged service cannot keep a failure out of the record.
   try {
@@ -124,14 +164,14 @@ export async function verifyOutcome(
     sb.from("verification_results").insert({
       verification_id: verificationId,
       service_id: input.service_id || null,
-      request_description: input.request_description,
+      request_description: safeText(input.request_description, 8_000),
       completeness_score: result.completeness_score,
       accuracy_score: result.accuracy_score,
       format_compliance: result.format_compliance,
       sla_met: result.sla_met,
       overall_pass: result.overall_pass,
-      issues: result.issues,
-      summary: result.summary,
+      issues: result.issues.slice(0, MAX_STORED_ISSUES).map((i) => safeText(i, MAX_ISSUE_LENGTH)),
+      summary: safeText(result.summary, MAX_SUMMARY_LENGTH),
       response_time_ms: typeof input.observed_response_time_ms === "number" ? Math.round(input.observed_response_time_ms) : null,
       verification_type: "full",
       reporter_wallet: reporterWallet,

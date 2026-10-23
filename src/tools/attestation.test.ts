@@ -51,6 +51,16 @@ test("the format and SLA rates count only rows where code checked them", async (
   assert.equal(none.sla_compliance_rate, null);
 });
 
+test("averages skip rows without a score, so a code-failed or inconclusive row does not count as zero", async () => {
+  const unscored = { ...row("B", false, null), completeness_score: null, accuracy_score: null, overall_pass: false };
+  const q = await getServiceQuality("svc", fakeSupabase([row("A", true, null), unscored]).sb);
+  assert.equal(q.avg_accuracy, 90);
+  assert.equal(q.avg_completeness, 90);
+  assert.equal(q.pass_rate, 50, "but it still counts as not passed");
+  const none = await getServiceQuality("svc", fakeSupabase([unscored]).sb);
+  assert.equal(none.avg_accuracy, null);
+});
+
 test("a report claims nothing about format or response time", async () => {
   const { sb, inserted } = fakeSupabase();
   await reportOutcome({ service_id: "svc", was_successful: true }, "WalletA", sb);

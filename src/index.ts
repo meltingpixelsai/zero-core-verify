@@ -122,12 +122,12 @@ const createPaidHandler = () => createMcpPaidHandler(
 
     paidTool(
       "verify_outcome",
-      "Post-transaction verification. Code checks what it can: the response against expected_schema (a JSON Schema or a list of required field names), and a measured response time against a stated limit. An AI judge scores accuracy and completeness as advice; it cannot pass a response that fails code's checks. Returns a verdict (pass, fail or inconclusive), scores, format compliance, SLA result, issues, and what code checked.",
+      "Post-transaction verification. Code checks what it can: the response against expected_schema (a JSON Schema or a list of required field names), and a measured response time against a stated limit. A response that fails code's checks fails without the AI judge; otherwise the judge scores accuracy and completeness as advice. Without a schema or a time limit only the judge decides, and decided_by says so. Returns a verdict (pass, fail or inconclusive), decided_by, scores, format compliance, SLA result, issues, and what code checked.",
       "$0.01",
       {
         request_description: z.string().max(8_000).describe("What was requested from the service"),
         response_data: z.string().max(100_000).describe("The actual response/output received from the service"),
-        expected_schema: z.string().max(20_000).optional().describe("A JSON Schema, or required field names separated by commas (e.g. 'name, price, url'). Prose is passed to the AI judge only."),
+        expected_schema: z.string().max(20_000).optional().describe("A JSON Schema, or two or more required field names separated by commas (e.g. 'name, price, url'). Anything else is passed to the AI judge only."),
         sla_requirements: z.string().max(2_000).optional().describe("SLA wording for the AI judge (e.g. 'must include all fields'). For a time limit code can check, use the two fields below."),
         service_id: z.string().max(200).optional().describe("Service identifier for quality tracking (e.g. 'harvey-tools/scrape_url')"),
         observed_response_time_ms: z.number().int().min(0).max(3_600_000).optional().describe("The response time you measured, in milliseconds"),

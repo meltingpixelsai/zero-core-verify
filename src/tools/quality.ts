@@ -6,8 +6,9 @@ interface ServiceQuality {
   total_verifications: number;
   /** Each paying wallet counts once: its latest report or verification. */
   distinct_reporters: number;
-  avg_completeness: number;
-  avg_accuracy: number;
+  /** Over the rows that have the score; null when none does (rows code failed first carry no accuracy). */
+  avg_completeness: number | null;
+  avg_accuracy: number | null;
   pass_rate: number;
   /** Over the rows where code checked the format; null when none did. */
   format_compliance_rate: number | null;
@@ -22,6 +23,12 @@ interface ServiceQuality {
 
 const UNATTESTED_NOTE =
   "Self-reported by paying wallets and not attested: nothing proves a reporter used the service, so treat these scores as unverified.";
+
+/** Rounded mean of a score over the rows that have it; null when none does. */
+function averageOf(rows: Array<Record<string, unknown>>, field: string): number | null {
+  const values = rows.map((r) => r[field]).filter((v): v is number => typeof v === "number");
+  return values.length ? Math.round(values.reduce((s, v) => s + v, 0) / values.length) : null;
+}
 
 /** Percentage of rows where the field is true, counting only rows that checked it; null when none did. */
 function checkedRate(rows: Array<Record<string, unknown>>, field: string): number | null {
@@ -61,8 +68,8 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
       service_id: serviceId,
       total_verifications: 0,
       distinct_reporters: 0,
-      avg_completeness: 0,
-      avg_accuracy: 0,
+      avg_completeness: null,
+      avg_accuracy: null,
       pass_rate: 0,
       format_compliance_rate: null,
       sla_compliance_rate: null,
@@ -74,20 +81,21 @@ export async function getServiceQuality(serviceId: string, sb: SupabaseClient = 
   }
 
   const total = data.length;
-  const avgCompleteness = Math.round(data.reduce((s, r) => s + (r.completeness_score ?? 0), 0) / total);
-  const avgAccuracy = Math.round(data.reduce((s, r) => s + (r.accuracy_score ?? 0), 0) / total);
+  const avgCompleteness = averageOf(data, "completeness_score");
+  const avgAccuracy = averageOf(data, "accuracy_score");
   const passRate = Math.round((data.filter((r) => r.overall_pass).length / total) * 100);
   const formatRate = checkedRate(data, "format_compliance");
   const slaRate = checkedRate(data, "sla_met");
 
-  // Calculate trend from recent vs older results
+  // Calculate trend from recent vs older results, over the rows that carry both scores
   let trend: "improving" | "stable" | "declining" | "insufficient_data" = "insufficient_data";
-  if (total >= 6) {
-    const half = Math.floor(total / 2);
-    const recent = data.slice(0, half);
-    const older = data.slice(half);
-    const recentAvg = recent.reduce((s, r) => s + (r.completeness_score ?? 0) + (r.accuracy_score ?? 0), 0) / (recent.length * 2);
-    const olderAvg = older.reduce((s, r) => s + (r.completeness_score ?? 0) + (r.accuracy_score ?? 0), 0) / (older.length * 2);
+  const scored = data.filter((r) => typeof r.completeness_score === "number" && typeof r.accuracy_score === "number");
+  if (scored.length >= 6) {
+    const half = Math.floor(scored.length / 2);
+    const recent = scored.slice(0, half);
+    const older = scored.slice(half);
+    const recentAvg = recent.reduce((s, r) => s + r.completeness_score + r.accuracy_score, 0) / (recent.length * 2);
+    const olderAvg = older.reduce((s, r) => s + r.completeness_score + r.accuracy_score, 0) / (older.length * 2);
     const diff = recentAvg - olderAvg;
     if (diff > 5) trend = "improving";
     else if (diff < -5) trend = "declining";

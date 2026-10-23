@@ -173,9 +173,11 @@ const MCP_CARD = {
         properties: {
           request_description: { type: "string", description: "What was requested from the service" },
           response_data: { type: "string", description: "The actual response/output received" },
-          expected_schema: { type: "string", description: "Expected output format or schema" },
-          sla_requirements: { type: "string", description: "SLA requirements to check against" },
+          expected_schema: { type: "string", description: "A JSON Schema, or two or more required field names separated by commas; code checks these. Anything else goes to the AI judge only." },
+          sla_requirements: { type: "string", description: "SLA wording for the AI judge; for a time limit code checks, use the two fields below" },
           service_id: { type: "string", description: "Service identifier for quality tracking" },
+          observed_response_time_ms: { type: "integer", description: "The response time you measured, in milliseconds" },
+          sla_max_response_time_ms: { type: "integer", description: "The response time limit, in milliseconds" },
         },
       },
     },
