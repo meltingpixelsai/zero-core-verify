@@ -118,7 +118,10 @@ export async function verifyOutcome(
     let reply: ReturnType<typeof parseJudgeReply> = null;
     let judgeFailed = false;
     const notChecked = [...checks.not_checked];
-    const response = forJudge(input.response_data, JUDGE_LIMITS.response_data);
+    // When code read the JSON from a code fence, the judge gets that block only: text around it went unchecked,
+    // and a strict schema that leaves no room for prose inside the JSON must leave none outside it either.
+    const response = forJudge(checks.fenced_body ?? input.response_data, JUDGE_LIMITS.response_data);
+    if (checks.fenced_body !== null) notChecked.push("judge: saw only the fenced block, not the text around it");
     if (response.cut) notChecked.push(`judge: saw the first ${JUDGE_LIMITS.response_data} characters of the response`);
     const optional = (text: string | undefined, max: number) => (text === undefined ? null : forJudge(text, max).text);
     try {

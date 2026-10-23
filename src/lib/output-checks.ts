@@ -39,6 +39,8 @@ export interface OutputChecks {
   required_present: number | null;
   /** null: no measured time and limit were given. */
   sla_met: boolean | null;
+  /** The code block code read the response from, when the JSON came inside a fence; the judge sees only this. */
+  fenced_body: string | null;
   /** Problems code found (they go into the verification's issues). */
   issues: string[];
   /** What code checked, in words. */
@@ -105,33 +107,34 @@ export function safeText(text: string, max = 300): string {
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isPrimitive = (v: unknown): boolean => v === null || ["string", "number", "boolean"].includes(typeof v);
 
-/** Characters that show nothing: whitespace, format characters such as the zero-width space, and the Hangul and
- * Braille fillers. */
-const INVISIBLE = /[\s\p{Cf}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}]/gu;
+/** Characters that show nothing: whitespace, format characters such as the zero-width space, the combining grapheme
+ * joiner, variation selectors, and the Hangul and Braille fillers. */
+const INVISIBLE = /[\s\p{Cf}\u{034F}\u{115F}\u{1160}\u{3164}\u{FE00}-\u{FE0F}\u{FFA0}\u{2800}]/gu;
 
 /**
- * True when nothing inside carries content: only null, blank strings, and lists or objects of those. A number or a
- * boolean is content. Walks without recursion, and gives up (false) past MAX_CONTENT_WALK values.
+ * Whether anything inside carries content: a number, a boolean, or a string with a visible character. null, blank
+ * strings, and lists or objects of those are "none". Walks without recursion; past MAX_CONTENT_WALK values it stops
+ * at "unknown", which code treats like "none": padding cannot buy a pass from code.
  */
-function hasNoContent(root: unknown): boolean {
+function contentOf(root: unknown): "content" | "none" | "unknown" {
   const stack: unknown[] = [root];
   for (let seen = 0; stack.length > 0; seen++) {
-    if (seen > MAX_CONTENT_WALK) return false;
+    if (seen > MAX_CONTENT_WALK) return "unknown";
     const v = stack.pop();
     if (v === null) continue;
     if (typeof v === "string") {
       if (v.replace(INVISIBLE, "") === "") continue;
-      return false;
+      return "content";
     }
     if (Array.isArray(v)) {
       for (const item of v) stack.push(item);
     } else if (isPlainObject(v)) {
       for (const key in v) if (Object.hasOwn(v, key)) stack.push(v[key]);
     } else {
-      return false;
+      return "content";
     }
   }
-  return true;
+  return "none";
 }
 
 /** True when `value` looks like a JSON Schema we can read: every schema keyword present has the right shape. */
@@ -211,18 +214,18 @@ function fencedBlock(text: string): string | null {
 
 /**
  * The response parsed as JSON. A leading byte-order mark is skipped: RFC 8259 lets a parser ignore it, so that is
- * still JSON. JSON in the response's one code fence is read too, but `fenced` says so: no reading makes a fenced
- * response JSON, only a lenient one makes its content the response.
+ * still JSON. JSON in the response's one code fence is read too, and `fencedBody` holds it: no reading makes a
+ * fenced response JSON, only a lenient one makes its content the response.
  */
-function parseResponse(text: string): { value: unknown; fenced: boolean } | null {
+function parseResponse(text: string): { value: unknown; fencedBody: string | null } | null {
   const body = text.startsWith("\ufeff") ? text.slice(1) : text;
   try {
-    return { value: JSON.parse(body), fenced: false };
+    return { value: JSON.parse(body), fencedBody: null };
   } catch {
     const inner = fencedBlock(body);
     if (inner === null) return null;
     try {
-      return { value: JSON.parse(inner), fenced: true };
+      return { value: JSON.parse(inner), fencedBody: inner };
     } catch {
       return null;
     }
@@ -414,7 +417,7 @@ class Checker {
 
 /** Everything code can decide about a response, before and regardless of the AI judge. */
 export function runOutputChecks(input: OutputCheckInput): OutputChecks {
-  const out: OutputChecks = { format_compliance: null, required_present: null, sla_met: null, issues: [], checked: [], not_checked: [] };
+  const out: OutputChecks = { format_compliance: null, required_present: null, sla_met: null, fenced_body: null, issues: [], checked: [], not_checked: [] };
   const spec = parseSchemaSpec(input.expected_schema);
 
   if (!spec) {
@@ -435,7 +438,12 @@ export function runOutputChecks(input: OutputCheckInput): OutputChecks {
     } else {
       const { value } = parsed;
       const checker = new Checker();
-      if (parsed.fenced) checker.uncertain.add("the JSON came inside a code fence");
+      if (parsed.fencedBody !== null) {
+        checker.uncertain.add("the JSON came inside a code fence");
+        // Code checked only the block; text around it (or on the fence line) must not reach the judge, or a
+        // service could address the judge there that a strict schema leaves no room for inside the JSON.
+        out.fenced_body = parsed.fencedBody;
+      }
       // Required fields apply only to an object: a value that is not one has none present only where an object is a must.
       let mustBeObject = true;
       if (root) {
@@ -458,9 +466,12 @@ export function runOutputChecks(input: OutputCheckInput): OutputChecks {
       }
       // Shape without content is not something code can vouch for: the judge alone decides it. This catches the
       // degenerate case only; one junk character is content, and judging content is the judge's job.
-      if (hasNoContent(value)) checker.uncertain.add("the response has no content");
-      else if (required.length && isPlainObject(value) && required.every((name) => Object.hasOwn(value, name)) && hasNoContent(required.map((name) => value[name]))) {
-        checker.uncertain.add("every required field is empty");
+      const whole = contentOf(value);
+      if (whole !== "content") {
+        checker.uncertain.add(whole === "none" ? "the response has no content" : "the response is too large for code to tell whether it has content");
+      } else if (required.length && isPlainObject(value) && required.every((name) => Object.hasOwn(value, name))) {
+        const fields = contentOf(required.map((name) => value[name]));
+        if (fields !== "content") checker.uncertain.add(fields === "none" ? "every required field is empty" : "the required fields are too large for code to tell whether they have content");
       }
       if (ctx.tooBig) out.not_checked.push(`format: the schema is larger or deeper than code checks (${MAX_SCHEMA_NODES} nodes, ${MAX_DEPTH} levels); the rest was not checked`);
       if (checker.exhausted) out.not_checked.push("format: the check stopped at its work limit");
