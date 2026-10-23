@@ -21,8 +21,8 @@ interface VerificationResult {
   summary: string;
 }
 
-/** Use Grok as LLM-as-judge to verify if a service outcome matches expectations */
-export async function verifyOutcome(input: VerificationInput): Promise<VerificationResult> {
+/** Use Grok as LLM-as-judge to verify if a service outcome matches expectations; the stored row names the paying wallet */
+export async function verifyOutcome(input: VerificationInput, reporterWallet: string): Promise<VerificationResult> {
   const verificationId = `ver_${randomUUID().slice(0, 12)}`;
 
   let userPrompt = `Verify this service outcome:
@@ -118,6 +118,7 @@ Scoring rules:
       issues: result.issues,
       summary: result.summary,
       verification_type: "full",
+      reporter_wallet: reporterWallet,
     }).then(({ error }) => {
       if (error) console.error("Failed to store verification:", error.message);
     });
