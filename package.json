@@ -4,7 +4,17 @@
   "description": "x402-paid MCP server for post-transaction outcome verification. Code checks format and time limits; an advisory AI judge scores accuracy. Pay-per-call USDC on Solana. Zero Core (formerly Harvey) Verify.",
   "type": "module",
   "mcpName": "io.github.meltingpixelsai/zero-core-verify",
-  "keywords": ["mcp", "x402", "usdc", "ai-agents", "verification", "quality", "outcome-verification", "llm-judge", "zero-core"],
+  "keywords": [
+    "mcp",
+    "x402",
+    "usdc",
+    "ai-agents",
+    "verification",
+    "quality",
+    "outcome-verification",
+    "llm-judge",
+    "zero-core"
+  ],
   "author": "MeltingPixels <jeremy@meltingpixels.com>",
   "license": "MIT",
   "repository": {
@@ -28,11 +38,15 @@
     "mcp-handler": "^1.0.2",
     "mcpay": "^0.1.17",
     "x402": "^0.6.5",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "wagmi": "file:stubs/wagmi-unused"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "wagmi": "$wagmi"
   }
 }
